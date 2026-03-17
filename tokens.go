@@ -1,0 +1,164 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	tiktoken "github.com/pkoukk/tiktoken-go"
+	openai "github.com/openai/openai-go/v3"
+)
+
+// SimpleMsg 用于在做 token 估算和裁剪时的轻量消息结构。
+type SimpleMsg struct {
+	Role    string
+	Content string
+}
+
+var (
+	encOnce sync.Once
+	enc     *tiktoken.Tiktoken
+	encErr  error
+)
+
+// getEncoder 返回全局复用的 tokenizer。
+// 目前默认使用 cl100k_base 编码，足以覆盖大多数兼容模型。
+func getEncoder() (*tiktoken.Tiktoken, error) {
+	encOnce.Do(func() {
+		enc, encErr = tiktoken.GetEncoding("cl100k_base")
+	})
+	return enc, encErr
+}
+
+// estimateTokensSimple 使用 tiktoken 对一组 SimpleMsg 精确估算 token 数。
+func estimateTokensSimple(msgs []SimpleMsg) int {
+	encoder, err := getEncoder()
+	if err != nil {
+		// 如果 tokenizer 初始化失败，退化为保守估计。
+		return len(msgs) * 50
+	}
+	total := 0
+	for _, m := range msgs {
+		text := m.Role + ":" + m.Content
+		ids := encoder.Encode(text, nil, nil)
+		total += len(ids)
+	}
+	return total
+}
+
+// ensureContextWithinLimitSimple 使用滚动摘要 reduce 的方式在给定上限下压缩 SimpleMsg。
+// 不直接删除历史，只通过多层摘要折叠到 bounded 窗口内。
+func ensureContextWithinLimitSimple(msgs []SimpleMsg, maxTokens int, agent *AgentCore) []SimpleMsg {
+	if maxTokens <= 0 || agent == nil {
+		return msgs
+	}
+	compressed, err := reduceHistory(msgs, maxTokens, agent)
+	if err != nil {
+		// 失败时回退为原始消息，避免影响主流程。
+		return msgs
+	}
+	return compressed
+}
+
+// reduceHistory 对按时间排序的 simpleMsgs 做多层滚动摘要，确保整体 token 数不超过 windowLimit。
+func reduceHistory(simpleMsgs []SimpleMsg, windowLimit int, agent *AgentCore) ([]SimpleMsg, error) {
+	if windowLimit <= 0 || len(simpleMsgs) == 0 || agent == nil || agent.Client == nil {
+		return simpleMsgs, nil
+	}
+
+	current := simpleMsgs
+	// 最多做几轮层级摘要，防止极端死循环。
+	for level := 0; level < 4 && estimateTokensSimple(current) > windowLimit; level++ {
+		chunks := splitIntoChunks(current, windowLimit)
+		summaries := make([]SimpleMsg, 0, len(chunks))
+		for _, chunk := range chunks {
+			// 对每个分块做一次摘要。
+			s, err := summarizeSimpleChunkWithLLM(agent, chunk)
+			if err != nil {
+				return current, err
+			}
+			if strings.TrimSpace(s.Content) == "" {
+				// 摘要失败则保留原始 chunk。
+				summaries = append(summaries, chunk...)
+			} else {
+				summaries = append(summaries, s)
+			}
+		}
+		if len(summaries) == 0 {
+			break
+		}
+		current = summaries
+	}
+	return current, nil
+}
+
+// splitIntoChunks 将消息按 windowLimit 切分为若干分块，保证每块估算 token 不超过 windowLimit（单条超长除外）。
+func splitIntoChunks(msgs []SimpleMsg, windowLimit int) [][]SimpleMsg {
+	if len(msgs) == 0 {
+		return nil
+	}
+	var chunks [][]SimpleMsg
+	var current []SimpleMsg
+	for _, m := range msgs {
+		withNew := append(append([]SimpleMsg{}, current...), m)
+		if len(current) > 0 && estimateTokensSimple(withNew) > windowLimit {
+			// 当前块已接近上限，先收束为一个 chunk。
+			chunks = append(chunks, current)
+			current = []SimpleMsg{m}
+			// 如果单条也超过上限，仍然作为一个独立块交给摘要处理。
+			if estimateTokensSimple(current) > windowLimit {
+				chunks = append(chunks, current)
+				current = nil
+			}
+		} else {
+			current = withNew
+		}
+	}
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+	return chunks
+}
+
+// summarizeSimpleChunkWithLLM 使用当前模型对一段 SimpleMsg 历史生成简短摘要。
+func summarizeSimpleChunkWithLLM(agent *AgentCore, chunk []SimpleMsg) (SimpleMsg, error) {
+	if len(chunk) == 0 || agent == nil || agent.Client == nil {
+		return SimpleMsg{}, nil
+	}
+	var historyText strings.Builder
+	for _, m := range chunk {
+		switch m.Role {
+		case "user":
+			fmt.Fprintf(&historyText, "用户: %s\n", m.Content)
+		case "assistant":
+			fmt.Fprintf(&historyText, "助手: %s\n", m.Content)
+		case "system":
+			fmt.Fprintf(&historyText, "系统: %s\n", m.Content)
+		default:
+			fmt.Fprintf(&historyText, "%s: %s\n", m.Role, m.Content)
+		}
+	}
+
+	sys := openai.SystemMessage("你是一个会话总结助手，请用简短中文总结以下对话的要点，突出长期偏好、重要结论和需要跨轮次记住的信息。尽量精炼，控制在200字以内。")
+	user := openai.UserMessage(historyText.String())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// 摘要本身也使用较小的输出上限（例如 256），不必占用过多 token。
+	resp, err := agent.Client.ChatOnce(ctx, []openai.ChatCompletionMessageParamUnion{sys, user}, nil, 256)
+	if err != nil {
+		return SimpleMsg{}, err
+	}
+	if len(resp.Choices) == 0 {
+		return SimpleMsg{}, nil
+	}
+	content := strings.TrimSpace(resp.Choices[0].Message.Content)
+	return SimpleMsg{
+		Role:    "system",
+		Content: content,
+	}, nil
+}
+

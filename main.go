@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,14 +40,17 @@ type OpenAIClient struct {
 	Model  string
 }
 
-// ChatOnce 调用一次 chat.completions，传入 messages 与 tools。
-func (c *OpenAIClient) ChatOnce(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, tools []openai.ChatCompletionToolUnionParam) (*openai.ChatCompletion, error) {
+// ChatOnce 调用一次 chat.completions，传入 messages 与 tools，并可指定最大输出 token 数。
+func (c *OpenAIClient) ChatOnce(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, tools []openai.ChatCompletionToolUnionParam, maxOutputTokens int) (*openai.ChatCompletion, error) {
 	if c.Model == "" {
 		return nil, errors.New("openai model is empty")
 	}
 	params := openai.ChatCompletionNewParams{
 		Model:    c.Model,
 		Messages: messages,
+	}
+	if maxOutputTokens > 0 {
+		params.MaxTokens = openai.Int(int64(maxOutputTokens))
 	}
 	if len(tools) > 0 {
 		params.Tools = tools
@@ -135,33 +139,34 @@ func (fs *WorkspaceFS) Append(rel, content string) error {
 
 // AgentCore 使用 OpenAI JSON 协议管理系统提示和对话历史。
 type AgentCore struct {
-	Client    *OpenAIClient
-	FS        *WorkspaceFS
-	Tools     []Tool
-	Executors map[string]ToolExecutor
-	Messages  []openai.ChatCompletionMessageParamUnion
+	Client            *OpenAIClient
+	FS                *WorkspaceFS
+	Tools             []Tool
+	Executors         map[string]ToolExecutor
+	SystemContent     string
+	UserProfile       string
+	MaxContextTokens  int
+	MaxOutputTokens   int
+	SummaryWindowDays int
 }
 
 // NewAgentCore 创建一个新的 AgentCore，由外部注入 OpenAIClient 与初始上下文。
-func NewAgentCore(client *OpenAIClient, systemContent, userProfile string, fs *WorkspaceFS) *AgentCore {
+func NewAgentCore(client *OpenAIClient, systemContent, userProfile string, fs *WorkspaceFS, maxContextTokens, maxOutputTokens int) *AgentCore {
 	var tools []Tool
 	executors := make(map[string]ToolExecutor)
 	if fs != nil {
 		tools, executors = defaultFilesystemTools(fs)
 	}
-	var messages []openai.ChatCompletionMessageParamUnion
-	if strings.TrimSpace(systemContent) != "" {
-		messages = append(messages, openai.SystemMessage(systemContent))
-	}
-	if strings.TrimSpace(userProfile) != "" {
-		messages = append(messages, openai.UserMessage(userProfile))
-	}
 	return &AgentCore{
-		Client:    client,
-		FS:        fs,
-		Tools:     tools,
-		Executors: executors,
-		Messages:  messages,
+		Client:            client,
+		FS:                fs,
+		Tools:             tools,
+		Executors:         executors,
+		SystemContent:     systemContent,
+		UserProfile:       userProfile,
+		MaxContextTokens:  maxContextTokens,
+		MaxOutputTokens:   maxOutputTokens,
+		SummaryWindowDays: defaultSummaryWindowDays,
 	}
 }
 
@@ -177,6 +182,11 @@ func defaultFilesystemTools(fs *WorkspaceFS) ([]Tool, map[string]ToolExecutor) {
 			Name:                 "workspace_write_file",
 			Description:          "覆盖写入 workspace 目录下的相对路径文件内容。",
 			ParametersJSONSchema: `{"type":"object","properties":{"path":{"type":"string","description":"要写入的相对路径，例如 NOTES.md"},"content":{"type":"string","description":"要写入文件的完整文本内容"}},"required":["path","content"]}`,
+		},
+		{
+			Name:                 "memory_write_important",
+			Description:          "记录需要长期记住的重要信息到 MEMORY.md。",
+			ParametersJSONSchema: `{"type":"object","properties":{"content":{"type":"string","description":"需要长期记住的重要信息"}},"required":["content"]}`,
 		},
 	}
 
@@ -209,6 +219,23 @@ func defaultFilesystemTools(fs *WorkspaceFS) ([]Tool, map[string]ToolExecutor) {
 			}
 			return "写入成功", nil
 		},
+		"memory_write_important": func(args json.RawMessage) (string, error) {
+			var payload struct {
+				Content string `json:"content"`
+			}
+			if err := json.Unmarshal(args, &payload); err != nil {
+				return "", fmt.Errorf("解析参数失败: %w", err)
+			}
+			if strings.TrimSpace(payload.Content) == "" {
+				return "", fmt.Errorf("content 不能为空")
+			}
+			now := nowInShanghai()
+			entry := fmt.Sprintf("\n\n## Memo at %s\n%s\n", now.Format(time.RFC3339), payload.Content)
+			if err := fs.Append("MEMORY.md", entry); err != nil {
+				return "", err
+			}
+			return "写入 MEMORY.md 成功", nil
+		},
 	}
 
 	return tools, executors
@@ -229,8 +256,13 @@ func (a *AgentCore) asOpenAITools() []openai.ChatCompletionToolUnionParam {
 	return out
 }
 
-// Handle 处理一轮用户输入，返回本轮模型回复的 Markdown 文本。
+// Handle 处理一轮用户输入，返回本轮模型回复的 Markdown 文本（使用默认会话）。
 func (a *AgentCore) Handle(userInput string) (string, error) {
+	return a.HandleWithSession("cli-default", userInput)
+}
+
+// HandleWithSession 按 session 维度处理一轮用户输入。
+func (a *AgentCore) HandleWithSession(sessionID, userInput string) (string, error) {
 	userInput = strings.TrimSpace(userInput)
 	if userInput == "" {
 		return "", fmt.Errorf("empty input")
@@ -238,27 +270,77 @@ func (a *AgentCore) Handle(userInput string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	a.Messages = append(a.Messages, openai.UserMessage(userInput))
+	// 构造轻量消息：系统 + 用户档案 + 会话历史 + 本轮 user，用于 token 估算与裁剪。
+	var simpleMsgs []SimpleMsg
+	if strings.TrimSpace(a.SystemContent) != "" {
+		simpleMsgs = append(simpleMsgs, SimpleMsg{Role: "system", Content: a.SystemContent})
+	}
+	if strings.TrimSpace(a.UserProfile) != "" {
+		simpleMsgs = append(simpleMsgs, SimpleMsg{Role: "user", Content: a.UserProfile})
+	}
+
+	// 读取该 session 的 active.json 作为历史。
+	if a.FS != nil {
+		sDir := sessionDir(sessionID)
+		activePath := filepath.Join(sDir, "active.json")
+		history, err := readSessionMessages(a.FS, activePath)
+		if err == nil {
+			for _, m := range history {
+				role := strings.TrimSpace(m.Role)
+				if role == "" {
+					continue
+				}
+				simpleMsgs = append(simpleMsgs, SimpleMsg{Role: role, Content: m.Content})
+			}
+		}
+	}
+
+	now := nowInShanghai()
+	userMsg := newUserMessage(userInput, now, map[string]interface{}{
+		"session_id": sessionID,
+	})
+	simpleMsgs = append(simpleMsgs, SimpleMsg{Role: "user", Content: userMsg.Content})
+
+	// 在调用模型前做上下文长度控制（精确 token 计算）。
+	effectiveLimit := a.MaxContextTokens
+	if a.MaxOutputTokens > 0 && a.MaxContextTokens > a.MaxOutputTokens {
+		effectiveLimit = a.MaxContextTokens - a.MaxOutputTokens
+	}
+	simpleMsgs = ensureContextWithinLimitSimple(simpleMsgs, effectiveLimit, a)
+
+	// 将 SimpleMsg 转换为 OpenAI SDK 所需的 messages。
+	var messages []openai.ChatCompletionMessageParamUnion
+	for _, m := range simpleMsgs {
+		switch m.Role {
+		case "system":
+			messages = append(messages, openai.SystemMessage(m.Content))
+		case "assistant":
+			messages = append(messages, openai.AssistantMessage(m.Content))
+		default:
+			// 其他一律按 user 处理，包括最初的 userProfile。
+			messages = append(messages, openai.UserMessage(m.Content))
+		}
+	}
 
 	tools := a.asOpenAITools()
 
 	for {
-		resp, err := a.Client.ChatOnce(ctx, a.Messages, tools)
+		resp, err := a.Client.ChatOnce(ctx, messages, tools, a.MaxOutputTokens)
 		if err != nil {
 			return "", err
 		}
 		choice := resp.Choices[0]
 		msg := choice.Message
 
-		// 追加 assistant 消息到对话历史
-		a.Messages = append(a.Messages, msg.ToParam())
-
 		// 没有工具调用，直接返回最终回复
 		if len(msg.ToolCalls) == 0 {
 			finalReply := msg.Content
 			if a.FS != nil {
-				entry := fmt.Sprintf("\n\n## Turn at %s\n\n### user\n%s\n\n### assistant\n%s\n", time.Now().Format(time.RFC3339), userInput, finalReply)
-				_ = a.FS.Append("MEMORY.md", entry)
+				// 将本轮对话写入 session 存储。
+				assistantMsg := newAssistantMessage(finalReply, now, map[string]interface{}{
+					"session_id": sessionID,
+				})
+				_ = appendToSessionFiles(a, sessionID, userMsg, assistantMsg, now)
 			}
 			return finalReply, nil
 		}
@@ -273,7 +355,7 @@ func (a *AgentCore) Handle(userInput string) (string, error) {
 				}
 				content += "执行出错: " + r.Error
 			}
-			a.Messages = append(a.Messages, openai.ToolMessage(content, r.CallID))
+			messages = append(messages, openai.ToolMessage(content, r.CallID))
 		}
 	}
 }
@@ -282,6 +364,16 @@ func (a *AgentCore) Handle(userInput string) (string, error) {
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+// envIntOrDefault 从环境变量读取整数值，若为空或解析失败则返回默认值。
+func envIntOrDefault(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return def
 }
@@ -398,7 +490,8 @@ func dispatchToolsOpenAI(calls []openai.ChatCompletionMessageToolCallUnion, exec
 
 // 默认模板内容。
 const defaultAgent = "# System\n" +
-	"你是一个命令行 Agent，只输出 Markdown。\n\n" +
+	"你是一个命令行 Agent，输入输出都是标准Open AI JSON协议数据\n" +
+	"Your name is Coral.\n\n" +
 	"## Filesystem Tools（OpenAI tools 协议）\n\n" +
 	"- 你可以通过一组工具访问 workspace 目录下的文件。\n" +
 	"- 所有路径必须是 workspace 根目录下的**相对路径**（例如：AGENT.md、USER.md、MEMORY.md），禁止访问绝对路径或使用 `..` 逃逸。\n\n" +
@@ -407,6 +500,9 @@ const defaultAgent = "# System\n" +
 	"   - 功能：读取 workspace 相对路径文件的内容。\n\n" +
 	"2. `workspace_write_file`\n" +
 	"   - 功能：覆盖写入 workspace 相对路径文件的内容。\n\n" +
+	"2. `memory_write_important`\n" +
+	"   - 功能：记录需要长期记住的重要信息到 MEMORY.md，例如用户的长期偏好、账号/业务静态信息等。\n" +
+	"   - 请只在你确信这些信息在未来多轮对话中仍然重要时才调用，避免把普通对话全部写入 MEMORY。\n\n" +
 	"### 工具调用方式\n\n" +
 	"- 主程序会通过 OpenAI JSON 协议把这些工具暴露给你；\n" +
 	"- 当你需要访问文件时，请通过标准 `tool_calls` 机制选择合适的工具并给出参数；\n" +
@@ -460,6 +556,8 @@ func main() {
 	baseURL := envOrDefault("OPENAI_BASE_URL", envOrDefault("LLAMA_SERVER_ENDPOINT", "http://localhost:8080/v1"))
 	model := envOrDefault("OPENAI_MODEL", envOrDefault("LLAMA_MODEL", "Qwen3.5-9B"))
 	apiKey := envOrDefault("OPENAI_API_KEY", os.Getenv("LLAMA_AUTH_TOKEN"))
+	maxContextTokens := envIntOrDefault("AGENT_MAX_CONTEXT_TOKENS", 0)
+	maxOutputTokens := envIntOrDefault("AGENT_MAX_OUTPUT_TOKENS", 0)
 
 	opts := []option.RequestOption{}
 	if baseURL != "" {
@@ -474,7 +572,7 @@ func main() {
 		Model:  model,
 	}
 
-	agent := NewAgentCore(openaiClient, systemContent, userProfile, fs)
+	agent := NewAgentCore(openaiClient, systemContent, userProfile, fs, maxContextTokens, maxOutputTokens)
 
 	fmt.Println("Minimal Go Agent (OpenAI JSON + local llama-server/Qwen)")
 	fmt.Printf("Workspace 目录: %s\n", workspaceDir)
