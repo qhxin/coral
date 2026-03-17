@@ -2,112 +2,231 @@ package main
 
 import (
 	"bufio"
-	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 )
 
-// LlamaClient 封装与本地 llama-server 的 HTTP 通信。
-type LlamaClient struct {
-	Endpoint string
-	Model    string
-	Client   *http.Client
-	AuthToken string
+// Tool 描述一个暴露给模型使用的工具（对齐 OpenAI tools 语义）。
+type Tool struct {
+	Name                 string
+	Description          string
+	ParametersJSONSchema string
 }
 
-// chatRequest / chatMessage / chatResponse 仅用于与 llama-server 之间的 JSON 通信。
-type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
+// ToolResult 表示一次工具调用的结果。
+type ToolResult struct {
+	CallID  string
+	Name    string
+	Content string
+	Error   string
 }
 
-type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+// ToolExecutor 是具体工具执行函数的签名。
+type ToolExecutor func(args json.RawMessage) (string, error)
+
+// OpenAIClient 封装与 OpenAI 兼容后端的 JSON 协议交互。
+type OpenAIClient struct {
+	Client openai.Client
+	Model  string
 }
 
-type chatResponse struct {
-	Choices []struct {
-		Message chatMessage `json:"message"`
-	} `json:"choices"`
-}
-
-// Complete 接收一个 Markdown prompt，向 llama-server 发起请求并返回模型回复的 Markdown 文本。
-func (lc *LlamaClient) Complete(markdownPrompt string) (string, error) {
-	if lc == nil {
-		return "", errors.New("llama client is nil")
+// ChatOnce 调用一次 chat.completions，传入 messages 与 tools。
+func (c *OpenAIClient) ChatOnce(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, tools []openai.ChatCompletionToolUnionParam) (*openai.ChatCompletion, error) {
+	if c.Model == "" {
+		return nil, errors.New("openai model is empty")
 	}
-	if lc.Endpoint == "" {
-		return "", errors.New("llama endpoint is empty")
+	params := openai.ChatCompletionNewParams{
+		Model:    c.Model,
+		Messages: messages,
 	}
-	if lc.Model == "" {
-		return "", errors.New("llama model is empty")
+	if len(tools) > 0 {
+		params.Tools = tools
 	}
+	resp, err := c.Client.Chat.Completions.New(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("empty choices from completion")
+	}
+	return resp, nil
+}
 
-	reqBody := chatRequest{
-		Model: lc.Model,
-		Messages: []chatMessage{
-			{Role: "user", Content: markdownPrompt},
+// WorkspaceFS 限制所有文件操作都在 workspace 根目录之下。
+type WorkspaceFS struct {
+	Root string
+}
+
+// resolveRel 将传入的相对路径解析为 workspace 下的绝对路径，并防止越权访问。
+func (fs *WorkspaceFS) resolveRel(rel string) (string, error) {
+	if rel == "" {
+		return "", fmt.Errorf("empty relative path")
+	}
+	joined := filepath.Join(fs.Root, rel)
+	cleanRoot, err := filepath.Abs(fs.Root)
+	if err != nil {
+		return "", err
+	}
+	cleanJoined, err := filepath.Abs(joined)
+	if err != nil {
+		return "", err
+	}
+	relPath, err := filepath.Rel(cleanRoot, cleanJoined)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(relPath, "..") {
+		return "", fmt.Errorf("path %q escapes workspace root", rel)
+	}
+	return cleanJoined, nil
+}
+
+// Read 读取 workspace 内相对路径文件的全部内容。
+func (fs *WorkspaceFS) Read(rel string) (string, error) {
+	full, err := fs.resolveRel(rel)
+	if err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(full)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// Write 覆盖写入 workspace 内相对路径文件的内容，必要时创建父目录。
+func (fs *WorkspaceFS) Write(rel, content string) error {
+	full, err := fs.resolveRel(rel)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(full, []byte(content), 0o644)
+}
+
+// Append 在 workspace 内相对路径文件末尾追加内容（若文件不存在则创建）。
+func (fs *WorkspaceFS) Append(rel, content string) error {
+	full, err := fs.resolveRel(rel)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(full, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(content)
+	return err
+}
+
+// AgentCore 使用 OpenAI JSON 协议管理系统提示和对话历史。
+type AgentCore struct {
+	Client    *OpenAIClient
+	FS        *WorkspaceFS
+	Tools     []Tool
+	Executors map[string]ToolExecutor
+	Messages  []openai.ChatCompletionMessageParamUnion
+}
+
+// NewAgentCore 创建一个新的 AgentCore，由外部注入 OpenAIClient 与初始上下文。
+func NewAgentCore(client *OpenAIClient, systemContent, userProfile string, fs *WorkspaceFS) *AgentCore {
+	var tools []Tool
+	executors := make(map[string]ToolExecutor)
+	if fs != nil {
+		tools, executors = defaultFilesystemTools(fs)
+	}
+	var messages []openai.ChatCompletionMessageParamUnion
+	if strings.TrimSpace(systemContent) != "" {
+		messages = append(messages, openai.SystemMessage(systemContent))
+	}
+	if strings.TrimSpace(userProfile) != "" {
+		messages = append(messages, openai.UserMessage(userProfile))
+	}
+	return &AgentCore{
+		Client:    client,
+		FS:        fs,
+		Tools:     tools,
+		Executors: executors,
+		Messages:  messages,
+	}
+}
+
+// defaultFilesystemTools 构造基于 WorkspaceFS 的默认文件系统工具集合。
+func defaultFilesystemTools(fs *WorkspaceFS) ([]Tool, map[string]ToolExecutor) {
+	tools := []Tool{
+		{
+			Name:                 "workspace_read_file",
+			Description:          "读取 workspace 目录下的相对路径文件内容。",
+			ParametersJSONSchema: `{"type":"object","properties":{"path":{"type":"string","description":"要读取的相对路径，例如 AGENT.md"}},"required":["path"]}`,
+		},
+		{
+			Name:                 "workspace_write_file",
+			Description:          "覆盖写入 workspace 目录下的相对路径文件内容。",
+			ParametersJSONSchema: `{"type":"object","properties":{"path":{"type":"string","description":"要写入的相对路径，例如 NOTES.md"},"content":{"type":"string","description":"要写入文件的完整文本内容"}},"required":["path","content"]}`,
 		},
 	}
 
-	b, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", err
+	executors := map[string]ToolExecutor{
+		"workspace_read_file": func(args json.RawMessage) (string, error) {
+			var payload struct {
+				Path string `json:"path"`
+			}
+			if err := json.Unmarshal(args, &payload); err != nil {
+				return "", fmt.Errorf("解析参数失败: %w", err)
+			}
+			if payload.Path == "" {
+				return "", fmt.Errorf("path 不能为空")
+			}
+			return fs.Read(payload.Path)
+		},
+		"workspace_write_file": func(args json.RawMessage) (string, error) {
+			var payload struct {
+				Path    string `json:"path"`
+				Content string `json:"content"`
+			}
+			if err := json.Unmarshal(args, &payload); err != nil {
+				return "", fmt.Errorf("解析参数失败: %w", err)
+			}
+			if payload.Path == "" {
+				return "", fmt.Errorf("path 不能为空")
+			}
+			if err := fs.Write(payload.Path, payload.Content); err != nil {
+				return "", err
+			}
+			return "写入成功", nil
+		},
 	}
 
-	httpReq, err := http.NewRequest(http.MethodPost, lc.Endpoint, bytes.NewReader(b))
-	if err != nil {
-		return "", err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if lc.AuthToken != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+lc.AuthToken)
-	}
-
-	resp, err := lc.Client.Do(httpReq)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("llama-server status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var cr chatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
-		return "", err
-	}
-
-	if len(cr.Choices) == 0 {
-		return "", fmt.Errorf("empty choices from llama-server")
-	}
-
-	return cr.Choices[0].Message.Content, nil
+	return tools, executors
 }
 
-// AgentCore 使用 Markdown 管理系统提示和对话历史。
-type AgentCore struct {
-	SystemPrompt string
-	History      string
-	Llama        *LlamaClient
-}
-
-// NewAgentCore 创建一个新的 AgentCore。
-func NewAgentCore(llama *LlamaClient) *AgentCore {
-	return &AgentCore{
-		SystemPrompt: "# System\n你是一个命令行 Agent，只输出 Markdown。\n",
-		History:      "# Conversation\n",
-		Llama:        llama,
+// asOpenAITools 将内部 Tool 列表转换为 OpenAI tools 定义。
+func (a *AgentCore) asOpenAITools() []openai.ChatCompletionToolUnionParam {
+	if len(a.Tools) == 0 {
+		return nil
 	}
+	out := make([]openai.ChatCompletionToolUnionParam, 0, len(a.Tools))
+	for _, t := range a.Tools {
+		out = append(out, openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+			Name:        t.Name,
+			Description: openai.String(t.Description),
+		}))
+	}
+	return out
 }
 
 // Handle 处理一轮用户输入，返回本轮模型回复的 Markdown 文本。
@@ -116,24 +235,47 @@ func (a *AgentCore) Handle(userInput string) (string, error) {
 	if userInput == "" {
 		return "", fmt.Errorf("empty input")
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
-	// 1. 追加本轮用户输入到 Markdown 历史中。
-	a.History += fmt.Sprintf("\n## user\n%s\n", userInput)
+	a.Messages = append(a.Messages, openai.UserMessage(userInput))
 
-	// 2. 构造完整的 prompt。
-	fullPrompt := a.SystemPrompt + "\n" + a.History +
-		"\n\n请以 Markdown 形式回复本轮 assistant 的内容。"
+	tools := a.asOpenAITools()
 
-	// 3. 调用 llama-server。
-	reply, err := a.Llama.Complete(fullPrompt)
-	if err != nil {
-		return "", err
+	for {
+		resp, err := a.Client.ChatOnce(ctx, a.Messages, tools)
+		if err != nil {
+			return "", err
+		}
+		choice := resp.Choices[0]
+		msg := choice.Message
+
+		// 追加 assistant 消息到对话历史
+		a.Messages = append(a.Messages, msg.ToParam())
+
+		// 没有工具调用，直接返回最终回复
+		if len(msg.ToolCalls) == 0 {
+			finalReply := msg.Content
+			if a.FS != nil {
+				entry := fmt.Sprintf("\n\n## Turn at %s\n\n### user\n%s\n\n### assistant\n%s\n", time.Now().Format(time.RFC3339), userInput, finalReply)
+				_ = a.FS.Append("MEMORY.md", entry)
+			}
+			return finalReply, nil
+		}
+
+		// 执行工具并将结果追加为 tool 消息
+		results := dispatchToolsOpenAI(msg.ToolCalls, a.Executors)
+		for _, r := range results {
+			content := r.Content
+			if r.Error != "" {
+				if content != "" {
+					content += "\n"
+				}
+				content += "执行出错: " + r.Error
+			}
+			a.Messages = append(a.Messages, openai.ToolMessage(content, r.CallID))
+		}
 	}
-
-	// 4. 将模型回复保存到历史中。
-	a.History += fmt.Sprintf("\n## assistant\n%s\n", reply)
-
-	return reply, nil
 }
 
 // envOrDefault 从环境变量读取值，若为空则返回默认值。
@@ -144,24 +286,201 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
-func main() {
-	endpoint := envOrDefault("LLAMA_SERVER_ENDPOINT", "http://localhost:8080/v1/chat/completions")
-	model := envOrDefault("LLAMA_MODEL", "Qwen3.5-9B")
-	authToken := os.Getenv("LLAMA_AUTH_TOKEN")
+// parseWorkspacePath 从命令行参数中解析 workspace 目录（可能为空字符串）。
+func parseWorkspacePath(args []string) (string, error) {
+	var ws string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "--workspace=") {
+			ws = strings.TrimPrefix(arg, "--workspace=")
+			break
+		}
+		if arg == "--workspace" || arg == "-w" {
+			if i+1 < len(args) {
+				ws = args[i+1]
+				break
+			}
+		}
+	}
+	if ws == "" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(ws)
+	if err != nil {
+		return "", err
+	}
+	return abs, nil
+}
 
-	llama := &LlamaClient{
-		Endpoint:  endpoint,
-		Model:     model,
-		AuthToken: authToken,
-		Client: &http.Client{
-			Timeout: 60 * time.Second,
-		},
+// resolveWorkspaceDir 解析最终的 workspace 目录，若未指定则基于可执行文件所在目录。
+func resolveWorkspaceDir() (string, error) {
+	ws, err := parseWorkspacePath(os.Args[1:])
+	if err != nil {
+		return "", err
+	}
+	if ws != "" {
+		return ws, nil
+	}
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	exeDir := filepath.Dir(exePath)
+	return filepath.Join(exeDir, "workspace"), nil
+}
+
+// initWorkspace 创建 workspace 目录及关键文件，并返回三个文件路径。
+func initWorkspace(dir string) (agentPath, userPath, memoryPath string, err error) {
+	if err = os.MkdirAll(dir, 0o755); err != nil {
+		return "", "", "", err
+	}
+	agentPath = filepath.Join(dir, "AGENT.md")
+	userPath = filepath.Join(dir, "USER.md")
+	memoryPath = filepath.Join(dir, "MEMORY.md")
+
+	if _, errStat := os.Stat(agentPath); errors.Is(errStat, os.ErrNotExist) {
+		if err = os.WriteFile(agentPath, []byte(defaultAgent), 0o644); err != nil {
+			return "", "", "", err
+		}
+	}
+	if _, errStat := os.Stat(userPath); errors.Is(errStat, os.ErrNotExist) {
+		if err = os.WriteFile(userPath, []byte(defaultUser), 0o644); err != nil {
+			return "", "", "", err
+		}
+	}
+	if _, errStat := os.Stat(memoryPath); errors.Is(errStat, os.ErrNotExist) {
+		if err = os.WriteFile(memoryPath, []byte(defaultMemory), 0o644); err != nil {
+			return "", "", "", err
+		}
+	}
+	return agentPath, userPath, memoryPath, nil
+}
+
+// readFileAsString 读取文本文件为字符串。
+func readFileAsString(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// dispatchToolsOpenAI 按名称分发并执行 OpenAI tool_calls。
+func dispatchToolsOpenAI(calls []openai.ChatCompletionMessageToolCallUnion, executors map[string]ToolExecutor) []ToolResult {
+	results := make([]ToolResult, 0, len(calls))
+	for _, c := range calls {
+		fn := c.AsFunction()
+		name := fn.Function.Name
+		exec, ok := executors[name]
+		if !ok {
+			results = append(results, ToolResult{
+				CallID:  fn.ID,
+				Name:    name,
+				Content: "",
+				Error:   fmt.Sprintf("未知工具: %s", name),
+			})
+			continue
+		}
+
+		out, err := exec(json.RawMessage(fn.Function.Arguments))
+		res := ToolResult{
+			CallID:  fn.ID,
+			Name:    name,
+			Content: out,
+		}
+		if err != nil {
+			res.Error = err.Error()
+		}
+		results = append(results, res)
+	}
+	return results
+}
+
+// 默认模板内容。
+const defaultAgent = "# System\n" +
+	"你是一个命令行 Agent，只输出 Markdown。\n\n" +
+	"## Filesystem Tools（OpenAI tools 协议）\n\n" +
+	"- 你可以通过一组工具访问 workspace 目录下的文件。\n" +
+	"- 所有路径必须是 workspace 根目录下的**相对路径**（例如：AGENT.md、USER.md、MEMORY.md），禁止访问绝对路径或使用 `..` 逃逸。\n\n" +
+	"当前可用工具：\n\n" +
+	"1. `workspace_read_file`\n" +
+	"   - 功能：读取 workspace 相对路径文件的内容。\n\n" +
+	"2. `workspace_write_file`\n" +
+	"   - 功能：覆盖写入 workspace 相对路径文件的内容。\n\n" +
+	"### 工具调用方式\n\n" +
+	"- 主程序会通过 OpenAI JSON 协议把这些工具暴露给你；\n" +
+	"- 当你需要访问文件时，请通过标准 `tool_calls` 机制选择合适的工具并给出参数；\n" +
+	"- 宿主程序会执行工具并将结果以 `tool` 消息形式注入到后续对话中，你在看到工具结果后继续完成本轮回答。\n"
+
+const defaultUser = `# User Profile
+- Name: 未命名用户
+- Timezone: Asia/Shanghai
+- Country: China
+- City:
+- Language: zh-CN`
+
+const defaultMemory = `# Long-term Memory
+该文件由系统维护，用于记录长期需要记住的重要信息，请谨慎手工修改。`
+
+func main() {
+	workspaceDir, err := resolveWorkspaceDir()
+	if err != nil {
+		fmt.Println("解析 workspace 目录失败:", err)
+		return
 	}
 
-	agent := NewAgentCore(llama)
+	agentPath, userPath, memoryPath, err := initWorkspace(workspaceDir)
+	if err != nil {
+		fmt.Println("初始化 workspace 失败:", err)
+		return
+	}
 
-	fmt.Println("Minimal Go Agent (Markdown + local llama-server)")
-	fmt.Println("环境变量：LLAMA_SERVER_ENDPOINT / LLAMA_MODEL 可覆盖默认配置。")
+	fs := &WorkspaceFS{Root: workspaceDir}
+
+	agentContent, err := readFileAsString(agentPath)
+	if err != nil {
+		fmt.Println("读取 AGENT.md 失败，将使用内置默认系统提示。错误:", err)
+		agentContent = defaultAgent
+	}
+
+	userContent, err := readFileAsString(userPath)
+	if err != nil {
+		fmt.Println("读取 USER.md 失败:", err)
+		userContent = ""
+	}
+
+	memoryContent, err := readFileAsString(memoryPath)
+	if err != nil {
+		fmt.Println("读取 MEMORY.md 失败:", err)
+		memoryContent = ""
+	}
+	systemContent := agentContent + "\n\n" + memoryContent
+	userProfile := userContent
+
+	baseURL := envOrDefault("OPENAI_BASE_URL", envOrDefault("LLAMA_SERVER_ENDPOINT", "http://localhost:8080/v1"))
+	model := envOrDefault("OPENAI_MODEL", envOrDefault("LLAMA_MODEL", "Qwen3.5-9B"))
+	apiKey := envOrDefault("OPENAI_API_KEY", os.Getenv("LLAMA_AUTH_TOKEN"))
+
+	opts := []option.RequestOption{}
+	if baseURL != "" {
+		opts = append(opts, option.WithBaseURL(baseURL))
+	}
+	if apiKey != "" {
+		opts = append(opts, option.WithAPIKey(apiKey))
+	}
+	client := openai.NewClient(opts...)
+	openaiClient := &OpenAIClient{
+		Client: client,
+		Model:  model,
+	}
+
+	agent := NewAgentCore(openaiClient, systemContent, userProfile, fs)
+
+	fmt.Println("Minimal Go Agent (OpenAI JSON + local llama-server/Qwen)")
+	fmt.Printf("Workspace 目录: %s\n", workspaceDir)
+	fmt.Println("配置文件: AGENT.md / USER.md / MEMORY.md 均位于该目录下。")
+	fmt.Println("Agent 会在需要时通过 OpenAI tools 协议调用文件系统工具（读取/写入 workspace 内的文件）。")
+	fmt.Println("环境变量：OPENAI_BASE_URL / OPENAI_MODEL / OPENAI_API_KEY（兼容 LLAMA_SERVER_ENDPOINT / LLAMA_MODEL / LLAMA_AUTH_TOKEN）。")
 	fmt.Println("输入内容并回车，与模型对话。输入 /exit 退出。")
 
 	// 未来扩展点示例（HTTP webhook / 飞书 WebSocket）：

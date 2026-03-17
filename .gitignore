@@ -1,6 +1,10 @@
 agent.exe
 corval.exe
+go-markdown-agent-bot.exe
+
+# 构建产物目录
+build/
 
 # 本地敏感配置（不提交到 git）
-config.md
+.env
 
