@@ -32,9 +32,9 @@ type EnvVarHelp struct {
 	Description string // 说明文本（不含注释前缀）
 }
 
-// envVarHelps 在构建时由构建脚本 shells/build.ps1 从 .env.template 解析并生成的 env_help_gen.go 中填充。
+// envVarHelps 在构建时由构建脚本 shells/build-all.sh 从 .env.template 解析并生成的 env_help_gen.go 中填充。
 // 注意：env_help_gen.go 为生成文件，请勿手工修改其中的 envVarHelps 内容。
-// 需要调整环境变量说明时，请编辑 .env.template 并通过 shells/build.ps1 重新构建。
+// 需要调整环境变量说明时，请编辑 .env.template 并通过 shells/build-all.sh 重新构建。
 var envVarHelps []EnvVarHelp
 
 // cliOptions 维护 coral 当前支持的所有命令行参数。

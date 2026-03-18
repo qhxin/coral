@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,7 +24,22 @@ type ChatMessage struct {
 const (
 	// 默认会话汇总窗口（天），超过该窗口的历史会被转为摘要。
 	defaultSummaryWindowDays = 7
+
+	// CORVAL_SUMMARY_WINDOW_DAYS 允许通过环境变量覆盖默认窗口天数（仅接受正整数）。
+	envSummaryWindowDays = "CORVAL_SUMMARY_WINDOW_DAYS"
 )
+
+func summaryWindowDaysFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv(envSummaryWindowDays))
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
 
 // sessionDir 返回某个 session 的目录相对路径（基于 workspace 根）。
 func sessionDir(sessionID string) string {
@@ -149,6 +165,9 @@ func appendToSessionFiles(agent *AgentCore, sessionID string, userMsg, assistant
 // compactActiveMessages 对 active 消息执行 7 天窗口与历史摘要压缩。
 func compactActiveMessages(agent *AgentCore, msgs []ChatMessage, now time.Time) ([]ChatMessage, error) {
 	windowDays := defaultSummaryWindowDays
+	if envDays := summaryWindowDaysFromEnv(); envDays > 0 {
+		windowDays = envDays
+	}
 	if agent != nil && agent.SummaryWindowDays > 0 {
 		windowDays = agent.SummaryWindowDays
 	}
