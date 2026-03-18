@@ -1,5 +1,5 @@
 ---
-name: go-markdown-agent-bot
+name: coral
 overview: 使用 Go 实现一个基于本地 llama-server、大纲化 Markdown 对话管理的最小命令行 Agent，并预留扩展到 HTTP webhook 与飞书 WebSocket 的能力。
 todos:
   - id: init-structure

@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-$whitelistFiles = @("timeutil.go")
+$whitelistFiles = @("src\\timeutil.go", "timeutil.go")
 
 # Prefer ripgrep if available, fall back to Select-String otherwise.
 $rgResult = $null

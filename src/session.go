@@ -269,5 +269,3 @@ func summarizeMessagesWithLLM(agent *AgentCore, msgs []ChatMessage, now time.Tim
 	return strings.TrimSpace(resp.Choices[0].Message.Content), from, to, nil
 }
 
-
-

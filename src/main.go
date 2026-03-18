@@ -840,14 +840,6 @@ func main() {
 	fmt.Println("环境变量：OPENAI_BASE_URL / OPENAI_MODEL / OPENAI_API_KEY（兼容 LLAMA_SERVER_ENDPOINT / LLAMA_MODEL / LLAMA_AUTH_TOKEN）。")
 	fmt.Println("输入内容并回车，与模型对话。输入 /exit 退出。")
 
-	// 未来扩展点示例（HTTP webhook / 飞书 WebSocket）：
-	// - HTTP webhook:
-	//   使用 net/http 启动一个 HTTP 服务器，在处理函数中读取请求体文本，
-	//   调用 agent.Handle(...) 获取 Markdown，然后将其写回响应。
-	// - 飞书 WebSocket:
-	//   在飞书 SDK 的回调中获取用户发送的文本，同样通过 agent.Handle(...)
-	//   获得 Markdown 回复，再通过 SDK 发送到对应会话。
-
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print("> ")
@@ -879,3 +871,4 @@ func main() {
 		fmt.Println("读取输入错误:", err)
 	}
 }
+

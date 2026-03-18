@@ -22,8 +22,8 @@ $outputPath = Join-Path $buildDir $Output
 
 Write-Host "===> Building Go agent: $outputPath"
 
-# 从 .env.template 生成 env_help_gen.go（供 main.go 中的 --help 使用）
-Write-Host "===> Generating env_help_gen.go from .env.template"
+# 从 .env.template 生成 src/env_help_gen.go（供 src/main.go 中的 --help 使用）
+Write-Host "===> Generating src/env_help_gen.go from .env.template"
 $envTemplatePath = ".env.template"
 $envLines = @()
 if (Test-Path $envTemplatePath) {
@@ -80,7 +80,7 @@ $goLines += "	}"
 $goLines += "	return true"
 $goLines += "}()"
 
-$envHelpPath = "env_help_gen.go"
+$envHelpPath = "src\\env_help_gen.go"
 $goLines | Set-Content -Path $envHelpPath -Encoding UTF8
 
 if (-not (Test-Path $envHelpPath)) {
@@ -94,7 +94,7 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-go build -o $outputPath
+go build -o $outputPath ./src
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Build failed." -ForegroundColor Red
     exit 1
