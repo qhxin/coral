@@ -78,8 +78,9 @@ type OpenAIClient struct {
 	Model  string
 }
 
-// ChatOnce 调用一次 chat.completions，传入 messages 与 tools，并可指定最大输出 token 数。
-func (c *OpenAIClient) ChatOnce(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, tools []openai.ChatCompletionToolUnionParam, maxOutputTokens int) (*openai.ChatCompletion, error) {
+// ChatOnce 调用一次 chat.completions，传入 messages 与 tools，并可指定最大输出 token 数与 tool_choice。
+// toolChoiceMode 取值建议："auto" / "required"；forceFunctionName 非空时强制调用指定 function tool。
+func (c *OpenAIClient) ChatOnce(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, tools []openai.ChatCompletionToolUnionParam, maxOutputTokens int, toolChoiceMode string, forceFunctionName string) (*openai.ChatCompletion, error) {
 	if c.Model == "" {
 		err := errors.New("openai model is empty")
 		log.Printf("error: ChatOnce called with empty model: %v", err)
@@ -94,7 +95,24 @@ func (c *OpenAIClient) ChatOnce(ctx context.Context, messages []openai.ChatCompl
 	}
 	if len(tools) > 0 {
 		params.Tools = tools
+		if forceFunctionName != "" {
+			params.ToolChoice = openai.ToolChoiceOptionFunctionToolChoice(openai.ChatCompletionNamedToolChoiceFunctionParam{
+				Name: forceFunctionName,
+			})
+		} else if toolChoiceMode != "" {
+			params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+				OfAuto: openai.String(toolChoiceMode),
+			}
+		}
 	}
+
+	// 记录即将发送的请求内容（不包含敏感信息）。
+	if b, err := json.Marshal(params); err == nil {
+		log.Printf("openai request: %s", string(b))
+	} else {
+		log.Printf("warn: failed to marshal openai request params: %v", err)
+	}
+
 	resp, err := c.Client.Chat.Completions.New(ctx, params)
 	if err != nil {
 		log.Printf("error: ChatOnce completion request failed: %v", err)
@@ -105,6 +123,14 @@ func (c *OpenAIClient) ChatOnce(ctx context.Context, messages []openai.ChatCompl
 		log.Printf("warn: ChatOnce got empty choices from model")
 		return nil, err
 	}
+
+	// 记录收到的响应内容。
+	if b, err := json.Marshal(resp); err == nil {
+		log.Printf("openai response: %s", string(b))
+	} else {
+		log.Printf("warn: failed to marshal openai response: %v", err)
+	}
+
 	return resp, nil
 }
 
@@ -279,10 +305,10 @@ func defaultFilesystemTools(fs *WorkspaceFS) ([]Tool, map[string]ToolExecutor) {
 				Path string `json:"path"`
 			}
 			if err := json.Unmarshal(args, &payload); err != nil {
-				return "", fmt.Errorf("解析参数失败: %w", err)
+				return "", fmt.Errorf("解析参数失败: %w。请重新调用 workspace_read_file，并传入 arguments：{\"path\":\"AGENT.md\"}", err)
 			}
 			if payload.Path == "" {
-				return "", fmt.Errorf("path 不能为空")
+				return "", fmt.Errorf("path 不能为空。请重新调用 workspace_read_file，并传入 arguments：{\"path\":\"AGENT.md\"}")
 			}
 			return fs.Read(payload.Path)
 		},
@@ -292,13 +318,13 @@ func defaultFilesystemTools(fs *WorkspaceFS) ([]Tool, map[string]ToolExecutor) {
 				Content string `json:"content"`
 			}
 			if err := json.Unmarshal(args, &payload); err != nil {
-				return "", fmt.Errorf("解析参数失败: %w", err)
+				return "", fmt.Errorf("解析参数失败: %w。请重新调用 workspace_write_file，并传入 arguments：{\"path\":\"a.txt\",\"content\":\"abc\"}", err)
 			}
 			if payload.Path == "" {
-				return "", fmt.Errorf("path 不能为空")
+				return "", fmt.Errorf("path 不能为空（你可能传入了空对象 {}）。请重新调用 workspace_write_file，并传入 arguments：{\"path\":\"a.txt\",\"content\":\"abc\"}")
 			}
 			if err := fs.Write(payload.Path, payload.Content); err != nil {
-				return "", err
+				return "", fmt.Errorf("写入失败: %w。请确认 path 是 workspace 内相对路径，例如 arguments：{\"path\":\"a.txt\",\"content\":\"abc\"}", err)
 			}
 			return "写入成功", nil
 		},
@@ -307,15 +333,15 @@ func defaultFilesystemTools(fs *WorkspaceFS) ([]Tool, map[string]ToolExecutor) {
 				Content string `json:"content"`
 			}
 			if err := json.Unmarshal(args, &payload); err != nil {
-				return "", fmt.Errorf("解析参数失败: %w", err)
+				return "", fmt.Errorf("解析参数失败: %w。请重新调用 memory_write_important，并传入 arguments：{\"content\":\"事事有回应，件件有着落，凡事有交待\"}", err)
 			}
 			if strings.TrimSpace(payload.Content) == "" {
-				return "", fmt.Errorf("content 不能为空")
+				return "", fmt.Errorf("content 不能为空（你可能传入了空对象 {}）。请重新调用 memory_write_important，并传入 arguments：{\"content\":\"事事有回应，件件有着落，凡事有交待\"}")
 			}
 			now := Now()
 			entry := fmt.Sprintf("\n\n## Memo at %s\n%s\n", now.Format(time.RFC3339), payload.Content)
 			if err := fs.Append("MEMORY.md", entry); err != nil {
-				return "", err
+				return "", fmt.Errorf("写入 MEMORY.md 失败: %w。请确认内容为纯文本，并重试调用 memory_write_important", err)
 			}
 			return "写入 MEMORY.md 成功", nil
 		},
@@ -331,9 +357,18 @@ func (a *AgentCore) asOpenAITools() []openai.ChatCompletionToolUnionParam {
 	}
 	out := make([]openai.ChatCompletionToolUnionParam, 0, len(a.Tools))
 	for _, t := range a.Tools {
+		var paramsSchema map[string]any
+		if strings.TrimSpace(t.ParametersJSONSchema) != "" {
+			if err := json.Unmarshal([]byte(t.ParametersJSONSchema), &paramsSchema); err != nil {
+				log.Printf("warn: failed to parse tool parameters schema for %s: %v", t.Name, err)
+				paramsSchema = nil
+			}
+		}
 		out = append(out, openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
 			Name:        t.Name,
 			Description: openai.String(t.Description),
+			Parameters:  paramsSchema,
+			Strict:      openai.Bool(true),
 		}))
 	}
 	return out
@@ -378,7 +413,7 @@ func (a *AgentCore) HandleWithSession(sessionID, userInput string) (string, erro
 		}
 	}
 
-			now := Now()
+	now := Now()
 	userMsg := newUserMessage(userInput, now, map[string]interface{}{
 		"session_id": sessionID,
 	})
@@ -407,8 +442,19 @@ func (a *AgentCore) HandleWithSession(sessionID, userInput string) (string, erro
 
 	tools := a.asOpenAITools()
 
+	forceMemory := shouldForceMemoryTool(userInput)
+
+	hadToolError := false
 	for {
-		resp, err := a.Client.ChatOnce(ctx, messages, tools, a.MaxOutputTokens)
+		toolChoice := "auto"
+		forceFunction := ""
+		if forceMemory {
+			forceFunction = "memory_write_important"
+		}
+		if hadToolError {
+			toolChoice = "required"
+		}
+		resp, err := a.Client.ChatOnce(ctx, messages, tools, a.MaxOutputTokens, toolChoice, forceFunction)
 		if err != nil {
 			return "", err
 		}
@@ -430,9 +476,11 @@ func (a *AgentCore) HandleWithSession(sessionID, userInput string) (string, erro
 
 		// 执行工具并将结果追加为 tool 消息
 		results := dispatchToolsOpenAI(msg.ToolCalls, a.Executors)
+		hadToolError = false
 		for _, r := range results {
 			content := r.Content
 			if r.Error != "" {
+				hadToolError = true
 				if content != "" {
 					content += "\n"
 				}
@@ -441,6 +489,35 @@ func (a *AgentCore) HandleWithSession(sessionID, userInput string) (string, erro
 			messages = append(messages, openai.ToolMessage(content, r.CallID))
 		}
 	}
+}
+
+func shouldForceMemoryTool(userInput string) bool {
+	s := strings.TrimSpace(userInput)
+	if s == "" {
+		return false
+	}
+	// 关键词规则：用户明确要求“长期/永远/永久记住”等，应强制调用 memory_write_important。
+	keywords := []string{
+		"长期记住",
+		"永久记住",
+		"永远记住",
+		"写入长期记忆",
+		"写入记忆",
+		"记录长期记忆",
+		"记到长期记忆",
+		"记入长期记忆",
+	}
+	for _, k := range keywords {
+		if strings.Contains(s, k) {
+			return true
+		}
+	}
+	// 更宽松的组合判断：同时包含“记住/记录”和“原则/偏好/信息/事项”也算。
+	if (strings.Contains(s, "记住") || strings.Contains(s, "记录")) &&
+		(strings.Contains(s, "原则") || strings.Contains(s, "偏好") || strings.Contains(s, "信息") || strings.Contains(s, "事项")) {
+		return true
+	}
+	return false
 }
 
 // envOrDefault 从环境变量读取值，若为空则返回默认值。
@@ -646,6 +723,37 @@ const defaultAgent = "# System\n" +
 	"### 工具调用方式\n\n" +
 	"- 主程序会通过 OpenAI JSON 协议把这些工具暴露给你；\n" +
 	"- 当你需要访问文件时，请通过标准 `tool_calls` 机制选择合适的工具并给出参数；\n" +
+	"- **重要规则**：当用户明确要求“长期/永久/永远记住”某条信息时，你必须调用 `memory_write_important` 将其写入长期记忆；禁止仅用自然语言声称已记录。\n" +
+	"- 你在发起工具调用时，**必须**在 `tool_calls` 中填写 `function.name` 和 `function.arguments`；其中 `function.arguments` 必须是**合法 JSON 字符串**，包含必填字段，禁止传空对象 `{}`。\n\n" +
+	"#### tool_calls JSON 示例\n\n" +
+	"示例 1：写文件 `workspace_write_file`\n\n" +
+	"```json\n" +
+	"{\n" +
+	"  \"tool_calls\": [\n" +
+	"    {\n" +
+	"      \"type\": \"function\",\n" +
+	"      \"function\": {\n" +
+	"        \"name\": \"workspace_write_file\",\n" +
+	"        \"arguments\": \"{\\\"path\\\":\\\"example.txt\\\",\\\"content\\\":\\\"example\\\"}\"\n" +
+	"      }\n" +
+	"    }\n" +
+	"  ]\n" +
+	"}\n" +
+	"```\n\n" +
+	"示例 2：写长期记忆 `memory_write_important`\n\n" +
+	"```json\n" +
+	"{\n" +
+	"  \"tool_calls\": [\n" +
+	"    {\n" +
+	"      \"type\": \"function\",\n" +
+	"      \"function\": {\n" +
+	"        \"name\": \"memory_write_important\",\n" +
+	"        \"arguments\": \"{\\\"content\\\":\\\"example\\\"}\"\n" +
+	"      }\n" +
+	"    }\n" +
+	"  ]\n" +
+	"}\n" +
+	"```\n\n" +
 	"- 宿主程序会执行工具并将结果以 `tool` 消息形式注入到后续对话中，你在看到工具结果后继续完成本轮回答。\n"
 
 const defaultUser = `# User Profile
@@ -771,4 +879,3 @@ func main() {
 		fmt.Println("读取输入错误:", err)
 	}
 }
-

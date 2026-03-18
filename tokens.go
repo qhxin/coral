@@ -152,7 +152,7 @@ func summarizeSimpleChunkWithLLM(agent *AgentCore, chunk []SimpleMsg) (SimpleMsg
 	defer cancel()
 
 	// 摘要本身也使用较小的输出上限（例如 256），不必占用过多 token。
-	resp, err := agent.Client.ChatOnce(ctx, []openai.ChatCompletionMessageParamUnion{sys, user}, nil, 256)
+	resp, err := agent.Client.ChatOnce(ctx, []openai.ChatCompletionMessageParamUnion{sys, user}, nil, 256, "", "")
 	if err != nil {
 		return SimpleMsg{}, err
 	}
