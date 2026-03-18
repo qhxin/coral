@@ -1,5 +1,5 @@
 # run.ps1
-# 从 .env 加载 OPENAI_* 配置并运行构建产物（build\corval.exe）
+# 从 .env 加载 OPENAI_* 配置并运行构建产物（build\coral.exe）
 
 Set-Location -Path "$PSScriptRoot\.."
 
@@ -31,16 +31,16 @@ if (-not $env:OPENAI_MODEL -and -not $env:LLAMA_MODEL) {
     $env:OPENAI_MODEL = "Qwen3.5-9B"
 }
 
-$exePath = ".\build\corval.exe"
+$exePath = ".\build\coral.exe"
 if (-not (Test-Path $exePath)) {
-    Write-Host "build\corval.exe not found, building..." -ForegroundColor Yellow
+    Write-Host "build\coral.exe not found, building..." -ForegroundColor Yellow
     & ".\shells\build.ps1"
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "Build failed, cannot start Corval." -ForegroundColor Red
+        Write-Host "Build failed, cannot start Coral." -ForegroundColor Red
         exit 1
     }
 }
 
-Write-Host "===> Starting Corval agent..."
+Write-Host "===> Starting Coral agent..."
 & $exePath
 

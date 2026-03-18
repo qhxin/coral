@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +37,8 @@ func getEncoder() (*tiktoken.Tiktoken, error) {
 func estimateTokensSimple(msgs []SimpleMsg) int {
 	encoder, err := getEncoder()
 	if err != nil {
-		// 如果 tokenizer 初始化失败，退化为保守估计。
+		// 如果 tokenizer 初始化失败，记录警告日志并退化为保守估计。
+		log.Printf("warn: tiktoken encoder init failed, fallback to rough token estimate: %v", err)
 		return len(msgs) * 50
 	}
 	total := 0
@@ -56,7 +58,8 @@ func ensureContextWithinLimitSimple(msgs []SimpleMsg, maxTokens int, agent *Agen
 	}
 	compressed, err := reduceHistory(msgs, maxTokens, agent)
 	if err != nil {
-		// 失败时回退为原始消息，避免影响主流程。
+		// 失败时记录错误并回退为原始消息，避免影响主流程。
+		log.Printf("error: reduceHistory failed, fallback to original messages: %v", err)
 		return msgs
 	}
 	return compressed
@@ -77,6 +80,7 @@ func reduceHistory(simpleMsgs []SimpleMsg, windowLimit int, agent *AgentCore) ([
 			// 对每个分块做一次摘要。
 			s, err := summarizeSimpleChunkWithLLM(agent, chunk)
 			if err != nil {
+				log.Printf("error: summarizeSimpleChunkWithLLM failed at level %d: %v", level, err)
 				return current, err
 			}
 			if strings.TrimSpace(s.Content) == "" {

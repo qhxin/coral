@@ -6,15 +6,53 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 )
+
+// CLIOption 描述一条命令行参数及其帮助信息。
+type CLIOption struct {
+	Long        string // 长参数名（不含前缀），例如 "workspace"
+	Short       string // 短参数名（不含前缀），例如 "w"
+	ArgName     string // 参数值占位符名，例如 "DIR"，若为空表示为布尔开关
+	Description string // 参数说明
+}
+
+// EnvVarHelp 描述一个环境变量及其说明。
+type EnvVarHelp struct {
+	Name        string // 环境变量名，例如 "OPENAI_BASE_URL"
+	Description string // 说明文本（不含注释前缀）
+}
+
+// envVarHelps 在构建时由构建脚本 shells/build.ps1 从 .env.template 解析并生成的 env_help_gen.go 中填充。
+// 注意：env_help_gen.go 为生成文件，请勿手工修改其中的 envVarHelps 内容。
+// 需要调整环境变量说明时，请编辑 .env.template 并通过 shells/build.ps1 重新构建。
+var envVarHelps []EnvVarHelp
+
+// cliOptions 维护 coral 当前支持的所有命令行参数。
+// 未来如需新增参数，只需在此处追加一条配置即可自动出现在 --help 列表中。
+var cliOptions = []CLIOption{
+	{
+		Long:        "workspace",
+		Short:       "w",
+		ArgName:     "DIR",
+		Description: "指定 workspace 目录（默认为可执行文件同级 workspace 子目录）",
+	},
+	{
+		Long:        "help",
+		Short:       "h",
+		ArgName:     "",
+		Description: "显示帮助信息并退出",
+	},
+}
 
 // Tool 描述一个暴露给模型使用的工具（对齐 OpenAI tools 语义）。
 type Tool struct {
@@ -43,7 +81,9 @@ type OpenAIClient struct {
 // ChatOnce 调用一次 chat.completions，传入 messages 与 tools，并可指定最大输出 token 数。
 func (c *OpenAIClient) ChatOnce(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, tools []openai.ChatCompletionToolUnionParam, maxOutputTokens int) (*openai.ChatCompletion, error) {
 	if c.Model == "" {
-		return nil, errors.New("openai model is empty")
+		err := errors.New("openai model is empty")
+		log.Printf("error: ChatOnce called with empty model: %v", err)
+		return nil, err
 	}
 	params := openai.ChatCompletionNewParams{
 		Model:    c.Model,
@@ -57,10 +97,13 @@ func (c *OpenAIClient) ChatOnce(ctx context.Context, messages []openai.ChatCompl
 	}
 	resp, err := c.Client.Chat.Completions.New(ctx, params)
 	if err != nil {
+		log.Printf("error: ChatOnce completion request failed: %v", err)
 		return nil, err
 	}
 	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("empty choices from completion")
+		err := fmt.Errorf("empty choices from completion")
+		log.Printf("warn: ChatOnce got empty choices from model")
+		return nil, err
 	}
 	return resp, nil
 }
@@ -68,6 +111,46 @@ func (c *OpenAIClient) ChatOnce(ctx context.Context, messages []openai.ChatCompl
 // WorkspaceFS 限制所有文件操作都在 workspace 根目录之下。
 type WorkspaceFS struct {
 	Root string
+}
+
+// dailyFileLogger 实现按天切分的文件日志写入器，所有 log.Printf 将写入 workspace/logs 目录下的当天文件。
+type dailyFileLogger struct {
+	baseDir     string
+	currentDate string
+	file        *os.File
+	mu          sync.Mutex
+}
+
+// newDailyFileLogger 创建一个基于 workspace/logs 目录的按天归档日志写入器。
+func newDailyFileLogger(baseDir string) *dailyFileLogger {
+	return &dailyFileLogger{baseDir: baseDir}
+}
+
+// Write 实现 io.Writer 接口，每次写入时根据统一时区当天日期选择/轮转日志文件。
+func (l *dailyFileLogger) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	today := Now().Format("2006-01-02")
+	if err := os.MkdirAll(l.baseDir, 0o755); err != nil {
+		return 0, err
+	}
+
+	// 若日期变化或尚未打开文件，则轮转到新的日志文件。
+	if l.file == nil || l.currentDate != today {
+		if l.file != nil {
+			_ = l.file.Close()
+		}
+		filename := filepath.Join(l.baseDir, today+".log")
+		f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return 0, err
+		}
+		l.file = f
+		l.currentDate = today
+	}
+
+	return l.file.Write(p)
 }
 
 // resolveRel 将传入的相对路径解析为 workspace 下的绝对路径，并防止越权访问。
@@ -229,7 +312,7 @@ func defaultFilesystemTools(fs *WorkspaceFS) ([]Tool, map[string]ToolExecutor) {
 			if strings.TrimSpace(payload.Content) == "" {
 				return "", fmt.Errorf("content 不能为空")
 			}
-			now := nowInShanghai()
+			now := Now()
 			entry := fmt.Sprintf("\n\n## Memo at %s\n%s\n", now.Format(time.RFC3339), payload.Content)
 			if err := fs.Append("MEMORY.md", entry); err != nil {
 				return "", err
@@ -256,7 +339,7 @@ func (a *AgentCore) asOpenAITools() []openai.ChatCompletionToolUnionParam {
 	return out
 }
 
-// Handle 处理一轮用户输入，返回本轮模型回复的 Markdown 文本（使用默认会话）。
+// Handle 处理一轮用户输入，返回本轮模型回复的纯文本内容（使用默认会话）。
 func (a *AgentCore) Handle(userInput string) (string, error) {
 	return a.HandleWithSession("cli-default", userInput)
 }
@@ -295,7 +378,7 @@ func (a *AgentCore) HandleWithSession(sessionID, userInput string) (string, erro
 		}
 	}
 
-	now := nowInShanghai()
+			now := Now()
 	userMsg := newUserMessage(userInput, now, map[string]interface{}{
 		"session_id": sessionID,
 	})
@@ -376,6 +459,63 @@ func envIntOrDefault(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// isHelpRequested 判断命令行参数中是否包含 --help 或 -h。
+func isHelpRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			return true
+		}
+	}
+	return false
+}
+
+// printHelp 打印 coral 程序的帮助信息，包括所有已注册的 CLI 参数。
+func printHelp() {
+	exe := filepath.Base(os.Args[0])
+	fmt.Printf("Coral - Minimal Go Agent (OpenAI JSON + local llama-server/Qwen)\n\n")
+	fmt.Printf("用法:\n")
+	fmt.Printf("  %s [选项]\n\n", exe)
+	fmt.Printf("选项:\n")
+	for _, opt := range cliOptions {
+		longForm := "--" + opt.Long
+		shortForm := ""
+		if opt.Short != "" {
+			shortForm = "-" + opt.Short
+		}
+
+		// 构造形如 "-w, --workspace DIR" 的展示形式。
+		namePart := ""
+		if shortForm != "" {
+			namePart = shortForm
+		}
+		if longForm != "" {
+			if namePart != "" {
+				namePart += ", "
+			}
+			namePart += longForm
+		}
+		if opt.ArgName != "" {
+			namePart += " " + opt.ArgName
+		}
+
+		fmt.Printf("  %-28s %s\n", namePart, opt.Description)
+	}
+
+	fmt.Println()
+	fmt.Println("环境变量（构建时从 .env.template 解析）：")
+	if len(envVarHelps) == 0 {
+		fmt.Println("  (无可用环境变量说明，请检查 .env.template 并重新构建)")
+	} else {
+		for _, h := range envVarHelps {
+			desc := h.Description
+			if desc == "" {
+				desc = "(无说明，详见 .env.template)"
+			}
+			fmt.Printf("  %-28s %s\n", h.Name, desc)
+		}
+	}
 }
 
 // parseWorkspacePath 从命令行参数中解析 workspace 目录（可能为空字符串）。
@@ -519,11 +659,22 @@ const defaultMemory = `# Long-term Memory
 该文件由系统维护，用于记录长期需要记住的重要信息，请谨慎手工修改。`
 
 func main() {
+	// 优先处理 --help/-h 请求，打印帮助后直接退出。
+	if isHelpRequested(os.Args[1:]) {
+		printHelp()
+		return
+	}
+
 	workspaceDir, err := resolveWorkspaceDir()
 	if err != nil {
 		fmt.Println("解析 workspace 目录失败:", err)
 		return
 	}
+
+	// 初始化按天归档的文件日志到 workspace/logs 目录。
+	logsDir := filepath.Join(workspaceDir, "logs")
+	log.SetOutput(newDailyFileLogger(logsDir))
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	agentPath, userPath, memoryPath, err := initWorkspace(workspaceDir)
 	if err != nil {

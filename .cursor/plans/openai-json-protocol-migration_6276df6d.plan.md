@@ -148,7 +148,7 @@ flowchart TD
 - 将 `config.example.md` 改造成文本型 `.env.template` 文件：
   - 不再使用 Markdown 标题/说明块，而是简单注释 + env：
   - 示例：
-    - `# Corval Agent 环境变量模板`
+    - `# Coral Agent 环境变量模板`
     - `OPENAI_BASE_URL=http://localhost:8080/v1`
     - `OPENAI_MODEL=Qwen3.5-9B`
     - `OPENAI_API_KEY=REPLACE_WITH_REAL_TOKEN`

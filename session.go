@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,21 +24,6 @@ const (
 	// 默认会话汇总窗口（天），超过该窗口的历史会被转为摘要。
 	defaultSummaryWindowDays = 7
 )
-
-// asiaShanghaiLocation 返回 Asia/Shanghai 时区。
-func asiaShanghaiLocation() *time.Location {
-	loc, err := time.LoadLocation("Asia/Shanghai")
-	if err != nil {
-		// 回退到本地时区，避免硬失败。
-		return time.FixedZone("CST", 8*60*60)
-	}
-	return loc
-}
-
-// nowInShanghai 返回当前 Asia/Shanghai 时间。
-func nowInShanghai() time.Time {
-	return time.Now().In(asiaShanghaiLocation())
-}
 
 // sessionDir 返回某个 session 的目录相对路径（基于 workspace 根）。
 func sessionDir(sessionID string) string {
@@ -65,6 +51,7 @@ func readSessionMessages(fs *WorkspaceFS, relPath string) ([]ChatMessage, error)
 		if os.IsNotExist(err) {
 			return []ChatMessage{}, nil
 		}
+		log.Printf("error: readSessionMessages failed for %s: %v", relPath, err)
 		return nil, err
 	}
 	if strings.TrimSpace(content) == "" {
@@ -81,9 +68,14 @@ func readSessionMessages(fs *WorkspaceFS, relPath string) ([]ChatMessage, error)
 func writeSessionMessages(fs *WorkspaceFS, relPath string, msgs []ChatMessage) error {
 	data, err := json.MarshalIndent(msgs, "", "  ")
 	if err != nil {
+		log.Printf("error: writeSessionMessages marshal failed for %s: %v", relPath, err)
 		return err
 	}
-	return fs.Write(relPath, string(data))
+	if err := fs.Write(relPath, string(data)); err != nil {
+		log.Printf("error: writeSessionMessages write failed for %s: %v", relPath, err)
+		return err
+	}
+	return nil
 }
 
 // newUserMessage 构造带时间戳的 user 消息。
@@ -129,10 +121,12 @@ func appendToSessionFiles(agent *AgentCore, sessionID string, userMsg, assistant
 	weeklyPath := filepath.Join(sDir, weekly)
 	weeklyMsgs, err := readSessionMessages(fs, weeklyPath)
 	if err != nil {
+		log.Printf("error: appendToSessionFiles read weekly file %s failed: %v", weeklyPath, err)
 		return err
 	}
 	weeklyMsgs = append(weeklyMsgs, userMsg, assistantMsg)
 	if err := writeSessionMessages(fs, weeklyPath, weeklyMsgs); err != nil {
+		log.Printf("error: appendToSessionFiles write weekly file %s failed: %v", weeklyPath, err)
 		return err
 	}
 
@@ -140,11 +134,13 @@ func appendToSessionFiles(agent *AgentCore, sessionID string, userMsg, assistant
 	activePath := filepath.Join(sDir, "active.json")
 	activeMsgs, err := readSessionMessages(fs, activePath)
 	if err != nil {
+		log.Printf("error: appendToSessionFiles read active file %s failed: %v", activePath, err)
 		return err
 	}
 	activeMsgs = append(activeMsgs, userMsg, assistantMsg)
 	activeMsgs, err = compactActiveMessages(agent, activeMsgs, now)
 	if err != nil {
+		log.Printf("error: appendToSessionFiles compactActiveMessages failed for session %s: %v", sessionID, err)
 		return err
 	}
 	return writeSessionMessages(fs, activePath, activeMsgs)
@@ -193,6 +189,9 @@ func compactActiveMessages(agent *AgentCore, msgs []ChatMessage, now time.Time) 
 
 	summaryText, from, to, err := summarizeMessagesWithLLM(agent, expired, now)
 	if err != nil || strings.TrimSpace(summaryText) == "" {
+		if err != nil {
+			log.Printf("warn: summarizeMessagesWithLLM failed, skip summarizing expired history: %v", err)
+		}
 		return recent, nil
 	}
 
@@ -260,9 +259,11 @@ func summarizeMessagesWithLLM(agent *AgentCore, msgs []ChatMessage, now time.Tim
 
 	resp, err := agent.Client.ChatOnce(ctx, []openai.ChatCompletionMessageParamUnion{sys, user}, nil, 256)
 	if err != nil {
+		log.Printf("error: summarizeMessagesWithLLM ChatOnce failed: %v", err)
 		return "", from, to, err
 	}
 	if len(resp.Choices) == 0 {
+		log.Printf("warn: summarizeMessagesWithLLM got empty choices from model")
 		return "", from, to, nil
 	}
 	return strings.TrimSpace(resp.Choices[0].Message.Content), from, to, nil
