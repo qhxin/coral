@@ -28,7 +28,7 @@ if [ -z "${FILTERED}" ]; then
   exit 0
 fi
 
-printf '%s\n' "ERROR: found forbidden direct time.Now() usage. Use Now() or asiaShanghaiLocation() instead."
+printf '%s\n' "ERROR: found forbidden direct time.Now() usage. Use Now() instead."
 printf '\n%s\n' "$FILTERED"
 exit 1
 

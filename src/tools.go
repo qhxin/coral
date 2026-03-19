@@ -66,13 +66,13 @@ func defaultFilesystemTools(fs *WorkspaceFS) ([]Tool, map[string]ToolExecutor) {
 				Content string `json:"content"`
 			}
 			if err := json.Unmarshal(args, &payload); err != nil {
-				return "", fmt.Errorf("解析参数失败: %w。请重新调用 workspace_write_file，并传入 arguments：{\"path\":\"a.txt\",\"content\":\"abc\"}", err)
+				return "", fmt.Errorf("解析参数失败: %w。请重新调用 workspace_write_file，并传入 arguments：{\"path\":\"example.txt\",\"content\":\"example\"}", err)
 			}
 			if payload.Path == "" {
-				return "", fmt.Errorf("path 不能为空（你可能传入了空对象 {}）。请重新调用 workspace_write_file，并传入 arguments：{\"path\":\"a.txt\",\"content\":\"abc\"}")
+				return "", fmt.Errorf("path 不能为空（你可能传入了空对象 {}）。请重新调用 workspace_write_file，并传入 arguments：{\"path\":\"example.txt\",\"content\":\"example\"}")
 			}
 			if err := fs.Write(payload.Path, payload.Content); err != nil {
-				return "", fmt.Errorf("写入失败: %w。请确认 path 是 workspace 内相对路径，例如 arguments：{\"path\":\"a.txt\",\"content\":\"abc\"}", err)
+				return "", fmt.Errorf("写入失败: %w。请确认 path 是 workspace 内相对路径，例如 arguments：{\"path\":\"example.txt\",\"content\":\"example\"}", err)
 			}
 			return "写入成功", nil
 		},
@@ -81,10 +81,10 @@ func defaultFilesystemTools(fs *WorkspaceFS) ([]Tool, map[string]ToolExecutor) {
 				Content string `json:"content"`
 			}
 			if err := json.Unmarshal(args, &payload); err != nil {
-				return "", fmt.Errorf("解析参数失败: %w。请重新调用 memory_write_important，并传入 arguments：{\"content\":\"事事有回应，件件有着落，凡事有交待\"}", err)
+				return "", fmt.Errorf("解析参数失败: %w。请重新调用 memory_write_important，并传入 arguments：{\"content\":\"example\"}", err)
 			}
 			if strings.TrimSpace(payload.Content) == "" {
-				return "", fmt.Errorf("content 不能为空（你可能传入了空对象 {}）。请重新调用 memory_write_important，并传入 arguments：{\"content\":\"事事有回应，件件有着落，凡事有交待\"}")
+				return "", fmt.Errorf("content 不能为空（你可能传入了空对象 {}）。请重新调用 memory_write_important，并传入 arguments：{\"content\":\"example\"}")
 			}
 			now := Now()
 			entry := fmt.Sprintf("\n\n## Memo at %s\n%s\n", now.Format(time.RFC3339), payload.Content)
@@ -158,4 +158,3 @@ func shouldForceMemoryTool(userInput string) bool {
 	}
 	return false
 }
-

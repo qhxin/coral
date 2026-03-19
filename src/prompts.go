@@ -35,7 +35,21 @@ const defaultAgent = "# System\n" +
 	"  ]\n" +
 	"}\n" +
 	"```\n\n" +
-	"示例 2：写长期记忆 `memory_write_important`\n\n" +
+	"示例 2：读文件 `workspace_read_file`\n\n" +
+	"```json\n" +
+	"{\n" +
+	"  \"tool_calls\": [\n" +
+	"    {\n" +
+	"      \"type\": \"function\",\n" +
+	"      \"function\": {\n" +
+	"        \"name\": \"workspace_read_file\",\n" +
+	"        \"arguments\": \"{\\\"path\\\":\\\"AGENT.md\\\"}\"\n" +
+	"      }\n" +
+	"    }\n" +
+	"  ]\n" +
+	"}\n" +
+	"```\n\n" +
+	"示例 3：写长期记忆 `memory_write_important`\n\n" +
 	"```json\n" +
 	"{\n" +
 	"  \"tool_calls\": [\n" +

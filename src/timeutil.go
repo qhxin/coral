@@ -2,28 +2,90 @@ package main
 
 import (
 	"log"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 )
 
-// asiaShanghaiLocation 返回 Asia/Shanghai 时区；失败时直接终止进程，避免静默使用错误时区。
-func asiaShanghaiLocation() *time.Location {
-	loc, err := time.LoadLocation("Asia/Shanghai")
-	if err != nil {
-		log.Fatalf("fatal: failed to load Asia/Shanghai location, please fix OS tzdata: %v", err)
+var corvalLoc *time.Location
+
+// tryParseUTCOffset 尝试解析类似 `UTC+8` / `UTC+08:30` 这类偏移格式。
+func tryParseUTCOffset(tz string) (*time.Location, bool) {
+	tz = strings.TrimSpace(tz)
+	if tz == "" {
+		return nil, false
 	}
-	return loc
+
+	// 统一大小写后只针对前缀 `UTC` 与符号/数字做匹配。
+	upper := strings.ToUpper(tz)
+	re := regexp.MustCompile(`^UTC([+-])(\d{1,2})(?::?(\d{1,2}))?$`)
+	m := re.FindStringSubmatch(upper)
+	if m == nil {
+		return nil, false
+	}
+
+	sign := 1
+	if m[1] == "-" {
+		sign = -1
+	}
+	hours, err := strconv.Atoi(m[2])
+	if err != nil {
+		log.Fatalf("fatal: invalid timezone offset hours %q in %q: %v", m[2], tz, err)
+	}
+	minutes := 0
+	if m[3] != "" {
+		minutes, err = strconv.Atoi(m[3])
+		if err != nil {
+			log.Fatalf("fatal: invalid timezone offset minutes %q in %q: %v", m[3], tz, err)
+		}
+	}
+
+	if hours < 0 || hours > 23 || minutes < 0 || minutes > 59 {
+		log.Fatalf("fatal: timezone offset out of range in %q (hours=%d, minutes=%d)", tz, hours, minutes)
+	}
+
+	offsetSeconds := sign * (hours*3600 + minutes*60)
+	return time.FixedZone(upper, offsetSeconds), true
 }
 
-// init 在程序启动时统一设置全局本地时区为 Asia/Shanghai (UTC+8)，
-// 确保后续若有直接使用 time.Now() 等未显式指定时区的调用，也默认使用 UTC+8。
+// corvalLocation 根据环境变量 TIMEZONE 解析并返回时区；
+// 失败时直接终止进程，避免静默使用错误时区。
+func corvalLocation() *time.Location {
+	// 保证仅解析一次（init 中会先调用一次）。
+	if corvalLoc != nil {
+		return corvalLoc
+	}
+
+	tz := strings.TrimSpace(os.Getenv("TIMEZONE"))
+	if tz == "" {
+		tz = "UTC+8"
+	}
+
+	if loc, ok := tryParseUTCOffset(tz); ok {
+		corvalLoc = loc
+		return corvalLoc
+	}
+
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		log.Fatalf("fatal: failed to load timezone %q; try using UTC+8 / UTC+08:30 or a valid IANA zone like Asia/Shanghai. error: %v", tz, err)
+	}
+	corvalLoc = loc
+	return corvalLoc
+}
+
+// init 在程序启动时统一设置全局本地时区为 corvalLocation（默认 UTC+8），
+// 确保后续若有直接使用 time.Now() 等未显式指定时区的调用，也默认使用该配置时区。
 func init() {
-	time.Local = asiaShanghaiLocation()
+	time.Local = corvalLocation()
 }
 
-// Now 返回统一的当前时间，固定为 Asia/Shanghai (UTC+8)。
-// 约定：业务代码禁止直接使用 time.Now()，一律使用 Now() 或显式基于 asiaShanghaiLocation。
+// Now 返回统一的当前时间，使用 corvalLocation 指定的时区。
+// 约定：业务代码禁止直接使用 time.Now()，一律使用 Now() 或显式基于 corvalLocation。
 func Now() time.Time {
-	return time.Now().In(asiaShanghaiLocation())
+	return time.Now().In(corvalLocation())
 }
 
 // NowUnix 返回统一时区下的 Unix 秒时间戳，方便日志或持久化。
@@ -35,4 +97,3 @@ func NowUnix() int64 {
 func NowRFC3339() string {
 	return Now().Format(time.RFC3339)
 }
-
