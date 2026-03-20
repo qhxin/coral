@@ -1,5 +1,9 @@
 # Coral Agent
 
+<p align="center">
+  <img src="logo.png" alt="Coral logo：小写 coral 字样，粉蓝拼色与珊瑚枝状装饰，透明背景。" width="400" />
+</p>
+
 Coral Agent 是一个用 Go 编写的轻量命令行 Agent：通过 **OpenAI 兼容的 JSON 协议** 与模型交互，并提供受限的本地 workspace 文件读写工具（OpenAI tools 语义）。
 
 ## 功能概览
