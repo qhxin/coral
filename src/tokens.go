@@ -17,6 +17,8 @@ import (
 type SimpleMsg struct {
 	Role    string
 	Content string
+	// ImageCount 仅本轮末尾 user 可能 >0，用于 vision 输入的保守 token 估算。
+	ImageCount int
 }
 
 var (
@@ -114,11 +116,17 @@ func chatMessagesRoleSummary(messages []openai.ChatCompletionMessageParamUnion) 
 }
 
 func estimateTokensSimple(msgs []SimpleMsg) int {
+	extraVision := 0
+	for _, m := range msgs {
+		if m.ImageCount > 0 {
+			extraVision += m.ImageCount * visionTokensPerImage()
+		}
+	}
 	encoder, err := getEncoder()
 	if err != nil {
 		// 如果 tokenizer 初始化失败，记录警告日志并退化为保守估计。
 		log.Printf("warn: tiktoken encoder init failed, fallback to rough token estimate: %v", err)
-		return len(msgs) * 50
+		return len(msgs)*50 + extraVision
 	}
 	total := 0
 	for _, m := range msgs {
@@ -126,7 +134,7 @@ func estimateTokensSimple(msgs []SimpleMsg) int {
 		ids := encoder.Encode(text, nil, nil)
 		total += len(ids)
 	}
-	return total
+	return total + extraVision
 }
 
 // ensureContextWithinLimitSimple 使用滚动摘要 reduce 的方式在给定上限下压缩 SimpleMsg。
@@ -145,25 +153,32 @@ func ensureContextWithinLimitSimple(msgs []SimpleMsg, maxTokens int, agent *Agen
 }
 
 // reduceHistory 对按时间排序的 simpleMsgs 做多层滚动摘要，确保整体 token 数不超过 windowLimit。
+// 始终保留最后一条消息（通常为当前用户输入，含多模态配额），避免摘要吃掉当前提问或图片占位。
 func reduceHistory(simpleMsgs []SimpleMsg, windowLimit int, agent *AgentCore) ([]SimpleMsg, error) {
 	if windowLimit <= 0 || len(simpleMsgs) == 0 || agent == nil || agent.Client == nil {
 		return simpleMsgs, nil
 	}
 
-	current := simpleMsgs
-	// 最多做几轮层级摘要，防止极端死循环。
-	for level := 0; level < 4 && estimateTokensSimple(current) > windowLimit; level++ {
-		chunks := splitIntoChunks(current, windowLimit)
+	tail := simpleMsgs[len(simpleMsgs)-1]
+	prefix := simpleMsgs[:len(simpleMsgs)-1]
+
+	for level := 0; level < 4; level++ {
+		cur := append(append([]SimpleMsg{}, prefix...), tail)
+		if estimateTokensSimple(cur) <= windowLimit {
+			return cur, nil
+		}
+		if len(prefix) == 0 {
+			return cur, nil
+		}
+		chunks := splitIntoChunks(prefix, windowLimit)
 		summaries := make([]SimpleMsg, 0, len(chunks))
 		for _, chunk := range chunks {
-			// 对每个分块做一次摘要。
 			s, err := summarizeSimpleChunkWithLLM(agent, chunk)
 			if err != nil {
 				log.Printf("error: summarizeSimpleChunkWithLLM failed at level %d: %v", level, err)
-				return current, err
+				return cur, err
 			}
 			if strings.TrimSpace(s.Content) == "" {
-				// 摘要失败则保留原始 chunk。
 				summaries = append(summaries, chunk...)
 			} else {
 				summaries = append(summaries, s)
@@ -172,9 +187,9 @@ func reduceHistory(simpleMsgs []SimpleMsg, windowLimit int, agent *AgentCore) ([
 		if len(summaries) == 0 {
 			break
 		}
-		current = summaries
+		prefix = summaries
 	}
-	return current, nil
+	return append(append([]SimpleMsg{}, prefix...), tail), nil
 }
 
 // splitIntoChunks 将消息按 windowLimit 切分为若干分块，保证每块估算 token 不超过 windowLimit（单条超长除外）。

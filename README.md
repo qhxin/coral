@@ -9,6 +9,7 @@ Coral Agent 是一个用 Go 编写的轻量命令行 Agent：通过 **OpenAI 兼
 - **工具调用**：暴露 `workspace_read_file / workspace_write_file / memory_write_important` 等工具给模型调用。
 - **帮助信息**：`--help/-h` 自动汇总 CLI 参数与环境变量说明（环境变量说明由 `.env.template` 在构建期生成）。
 - **飞书机器人（长连接）**：`--feishu` 使用官方 WebSocket 通道接收 `im.message.receive_v1`，按聊天 `chat_id` 映射会话；模型回复优先以 **post 富文本** 发送以呈现 Markdown 结构（标题/列表/粗斜体/链接/代码样式等），失败时降级为纯文本。需企业自建应用并开通机器人能力与相关 IM 权限。
+- **多模态（图文）**：飞书 **图片消息**（`message_type=image`）会通过消息资源接口拉取后，以 OpenAI 兼容的 `image_url`（data URL）随本轮 user 消息提交；CLI 可使用 `/img 路径 你的问题` 或 `/img "含空格路径" 问题`。**须使用支持视觉的模型与后端**；会话 `active.json` 仅存文字描述与可选的 `metadata.image_count`，大图为避免 JSON 膨胀默认不落盘，需要审计时可设 `CORVAL_SAVE_INBOUND_MEDIA=1`。
 
 ## 快速开始（跨平台：macOS / Linux / Windows）
 
@@ -50,16 +51,17 @@ export FEISHU_APP_SECRET=xxx
 
 - 会话目录为 `sessions/feishu-chat-<chat_id>/`，与 CLI 默认会话隔离。
 - `FEISHU_QUICK_ACK_TEXT`：**留空**或 **`false` / `0`** 则不立即响应；**`true` / `1`** 时对用户本条消息添加点赞类表情（`THUMBSUP`）；**其它字符串**则先发该文案再异步生成完整内容。需在开放平台开通消息表情回复相关权限（若使用点赞模式）。
-- `FEISHU_GROUP_AT_ONLY=1` 时，仅当飞书事件里 `mentions` 非空才回复（常用于群内需 @ 机器人的场景）。
+- `FEISHU_GROUP_AT_ONLY=1` 时，仅当飞书事件里 `mentions` 非空才回复（常用于群内需 @ 机器人的场景）；纯图片消息若无 @ 则同样不会回复。
 - **Markdown 渲染**为向飞书 post 结构的映射，复杂表格/Mermaid 等可能等价度有限；极长内容会自动拆成多条消息。
+- 多模态相关环境变量见 `.env.template`（`AGENT_VISION_TOKENS_PER_IMAGE`、`AGENT_VISION_MAX_IMAGE_BYTES`、`CORVAL_VISION_EMPTY_TEXT`、`CORVAL_SAVE_INBOUND_MEDIA`）。
 
 ## 代码行数（Go）
 
 <!-- LOC:START -->
-Updated at: 2026-03-20 18:32:55
+Updated at: 2026-03-20 20:29:10
 
-- Go files: 16
-- Go LOC (code lines, excludes blanks & comments): 2249
+- Go files: 18
+- Go LOC (code lines, excludes blanks & comments): 2539
 <!-- LOC:END -->
 
 统计并更新本文件：

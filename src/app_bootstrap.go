@@ -81,6 +81,7 @@ func runCLIPrompt(agent *AgentCore, workspaceDir string) {
 	fmt.Println("配置文件: AGENT.md / USER.md / MEMORY.md 均位于该目录下。")
 	fmt.Println("Agent 会在需要时通过 OpenAI tools 协议调用文件系统工具（读取/写入 workspace 内的文件）。")
 	fmt.Println("环境变量：OPENAI_BASE_URL / OPENAI_MODEL / OPENAI_API_KEY（兼容 LLAMA_SERVER_ENDPOINT / LLAMA_MODEL / LLAMA_AUTH_TOKEN）。")
+	fmt.Println("多模态：`/img 路径 你的问题` 或 `/img \"含空格路径\" 问题`（模型须支持视觉）。")
 	fmt.Println("输入内容并回车，与模型对话。输入 /exit 退出。")
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -97,6 +98,24 @@ func runCLIPrompt(agent *AgentCore, workspaceDir string) {
 		if line == "/exit" {
 			fmt.Println("再见。")
 			return
+		}
+
+		if imgPath, imgPrompt, ok := parseCLIImgLine(line); ok {
+			data, err := os.ReadFile(imgPath)
+			if err != nil {
+				fmt.Println("错误:", err)
+				continue
+			}
+			fmt.Println("已接收图片，处理中...")
+			reply, err := agent.HandleWithSessionWithMedia("cli-default", imgPrompt, []UserImage{{Data: data}})
+			if err != nil {
+				fmt.Println("错误:", err)
+				continue
+			}
+			fmt.Println()
+			fmt.Println(reply)
+			fmt.Println()
+			continue
 		}
 
 		reply, err := agent.Handle(line)

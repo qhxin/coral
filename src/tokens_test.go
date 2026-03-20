@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -142,5 +144,65 @@ func TestMarshal_skips_badToolForEstimate(t *testing.T) {
 	}
 	if len(b) == 0 {
 		t.Fatal()
+	}
+}
+
+func TestEstimateTokensSimple_visionAddon(t *testing.T) {
+	t.Setenv("AGENT_VISION_TOKENS_PER_IMAGE", "100")
+	base := estimateTokensSimple([]SimpleMsg{{Role: "user", Content: "a"}})
+	with := estimateTokensSimple([]SimpleMsg{{Role: "user", Content: "a", ImageCount: 2}})
+	if with < base+200 {
+		t.Fatalf("want >= base+200, base=%d with=%d", base, with)
+	}
+}
+
+func TestReduceHistory_pinsLastMessage(t *testing.T) {
+	var bodies []string
+	for i := 0; i < 24; i++ {
+		bodies = append(bodies, completionJSON("摘要", ""))
+	}
+	srv := newTestOpenAIServer(t, bodies...)
+	defer srv.Close()
+	ag := &AgentCore{Client: newStubOpenAIClient(t, srv.URL, "m", 2)}
+	long := strings.Repeat("x", 500)
+	tail := SimpleMsg{Role: "user", Content: "must-keep-question-unique-789"}
+	msgs := []SimpleMsg{
+		{Role: "user", Content: long},
+		{Role: "assistant", Content: long},
+		tail,
+	}
+	out, err := reduceHistory(msgs, 80, ag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) == 0 || out[len(out)-1].Content != tail.Content {
+		t.Fatalf("tail not preserved: %#v", out)
+	}
+}
+
+func TestEnsureContextWithinLimitSimple_onReduceError_returnsOriginal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	ag := &AgentCore{Client: newStubOpenAIClient(t, srv.URL, "m", 2)}
+	msgs := []SimpleMsg{
+		{Role: "user", Content: strings.Repeat("a", 400)},
+		{Role: "assistant", Content: strings.Repeat("b", 400)},
+		{Role: "user", Content: "tail"},
+	}
+	out := ensureContextWithinLimitSimple(msgs, 80, ag)
+	if len(out) != len(msgs) {
+		t.Fatalf("got %d want %d", len(out), len(msgs))
+	}
+}
+
+func TestSummarizeSimpleChunkWithLLM_toolRoleLine(t *testing.T) {
+	srv := newTestOpenAIServer(t, completionJSON(" ok ", ""))
+	t.Cleanup(srv.Close)
+	a := &AgentCore{Client: newStubOpenAIClient(t, srv.URL, "m", 1)}
+	msg, err := summarizeSimpleChunkWithLLM(a, []SimpleMsg{{Role: "tool", Content: "out"}})
+	if err != nil || msg.Role != "system" || msg.Content != "ok" {
+		t.Fatal(err, msg)
 	}
 }

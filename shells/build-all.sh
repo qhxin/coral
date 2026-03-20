@@ -36,6 +36,9 @@ sh "$SCRIPT_DIR/check-time.sh"
 echo "===> Counting Go LOC (shells/count-go-loc.sh)"
 sh "$SCRIPT_DIR/count-go-loc.sh"
 
+echo "===> Go test branch/block coverage gate (shells/check-go-test-branch-cover.sh)"
+sh "$SCRIPT_DIR/check-go-test-branch-cover.sh"
+
 echo "===> Generating src/env_help_gen.go from .env.template"
 ENV_TEMPLATE=".env.template"
 ENV_HELP_PATH="src/env_help_gen.go"

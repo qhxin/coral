@@ -76,10 +76,25 @@ func (a *AgentCore) Handle(userInput string) (string, error) {
 
 // HandleWithSession 按 session 维度处理一轮用户输入。
 func (a *AgentCore) HandleWithSession(sessionID, userInput string) (string, error) {
-	userInput = strings.TrimSpace(userInput)
-	if userInput == "" {
+	return a.HandleWithSessionWithMedia(sessionID, userInput, nil)
+}
+
+// HandleWithSessionWithMedia 与 HandleWithSession 相同，但允许附带图像（仅随本轮请求提交；会话文件仅存描述文本）。
+func (a *AgentCore) HandleWithSessionWithMedia(sessionID string, userInput string, images []UserImage) (string, error) {
+	rawText := strings.TrimSpace(userInput)
+	if len(images) > 0 {
+		if err := validateUserImages(images); err != nil {
+			return "", err
+		}
+	}
+	if rawText == "" && len(images) == 0 {
 		return "", fmt.Errorf("empty input")
 	}
+	modelUserText := rawText
+	if modelUserText == "" {
+		modelUserText = visionEmptyPrompt()
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -109,35 +124,44 @@ func (a *AgentCore) HandleWithSession(sessionID, userInput string) (string, erro
 	}
 
 	now := Now()
-	userMsg := newUserMessage(userInput, now, map[string]interface{}{
-		"session_id": sessionID,
+	persistText := persistenceUserTextForVisionTurn(rawText, len(images))
+	meta := map[string]interface{}{
+		"session_id":  sessionID,
+		"image_count": len(images),
+	}
+	if paths := saveInboundMediaIfEnabled(a.FS, sessionID, images); len(paths) > 0 {
+		meta["media_files"] = paths
+	}
+	userMsg := newUserMessage(persistText, now, meta)
+	simpleMsgs = append(simpleMsgs, SimpleMsg{
+		Role:       "user",
+		Content:    persistText,
+		ImageCount: len(images),
 	})
-	simpleMsgs = append(simpleMsgs, SimpleMsg{Role: "user", Content: userMsg.Content})
 
-	// 在调用模型前做上下文长度控制（精确 token 计算）。
 	effectiveLimit := a.MaxContextTokens
 	if a.MaxOutputTokens > 0 && a.MaxContextTokens > a.MaxOutputTokens {
 		effectiveLimit = a.MaxContextTokens - a.MaxOutputTokens
 	}
 	simpleMsgs = ensureContextWithinLimitSimple(simpleMsgs, effectiveLimit, a)
 
-	// 将 SimpleMsg 转换为 OpenAI SDK 所需的 messages。
-	var messages []openai.ChatCompletionMessageParamUnion
-	for _, m := range simpleMsgs {
-		switch m.Role {
-		case "system":
-			messages = append(messages, openai.SystemMessage(m.Content))
-		case "assistant":
-			messages = append(messages, openai.AssistantMessage(m.Content))
-		default:
-			// 其他一律按 user 处理，包括最初的 userProfile。
-			messages = append(messages, openai.UserMessage(m.Content))
+	// 最后一条 user 如含图则构造多段 content；其余仍为纯文本。
+	lastUserImages := images
+	if len(images) > 0 {
+		last := simpleMsgs[len(simpleMsgs)-1]
+		if last.ImageCount == 0 {
+			lastUserImages = nil
 		}
 	}
+	messages := simpleMsgsToOpenAI(simpleMsgs, modelUserText, lastUserImages)
 
 	tools := a.asOpenAITools()
 
-	forceMemory := shouldForceMemoryTool(userInput)
+	forceKey := rawText
+	if forceKey == "" {
+		forceKey = modelUserText
+	}
+	forceMemory := shouldForceMemoryTool(forceKey)
 
 	hadToolError := false
 	toolRound := 0
@@ -168,11 +192,9 @@ func (a *AgentCore) HandleWithSession(sessionID, userInput string) (string, erro
 		choice := resp.Choices[0]
 		msg := choice.Message
 
-		// 没有工具调用，直接返回最终回复
 		if len(msg.ToolCalls) == 0 {
 			finalReply := msg.Content
 			if a.FS != nil {
-				// 将本轮对话写入 session 存储。
 				assistantMsg := newAssistantMessage(finalReply, now, map[string]interface{}{
 					"session_id": sessionID,
 				})
@@ -181,7 +203,6 @@ func (a *AgentCore) HandleWithSession(sessionID, userInput string) (string, erro
 			return finalReply, nil
 		}
 
-		// 执行工具并将结果追加为 tool 消息
 		results := dispatchToolsOpenAI(msg.ToolCalls, a.Executors)
 		hadToolError = false
 		for _, r := range results {
@@ -198,3 +219,41 @@ func (a *AgentCore) HandleWithSession(sessionID, userInput string) (string, erro
 	}
 }
 
+// simpleMsgsToOpenAI 将 SimpleMsg 转为 API 消息；仅当末条为带图的当前 user 时使用多模态。
+// modelUserText 为发给模型的用户正文（无图时与 persist 文本一致；纯图时为默认提示句）。
+func simpleMsgsToOpenAI(msgs []SimpleMsg, modelUserText string, lastUserImages []UserImage) []openai.ChatCompletionMessageParamUnion {
+	if len(msgs) == 0 {
+		return nil
+	}
+	last := len(msgs) - 1
+	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
+	for i, m := range msgs {
+		switch m.Role {
+		case "system":
+			out = append(out, openai.SystemMessage(m.Content))
+		case "assistant":
+			out = append(out, openai.AssistantMessage(m.Content))
+		default:
+			if i == last && len(lastUserImages) > 0 {
+				out = append(out, openAIUserMessageForTurn(modelUserText, lastUserImages))
+			} else {
+				out = append(out, openai.UserMessage(m.Content))
+			}
+		}
+	}
+	return out
+}
+
+func openAIUserMessageForTurn(text string, images []UserImage) openai.ChatCompletionMessageParamUnion {
+	if len(images) == 0 {
+		return openai.UserMessage(text)
+	}
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, 1+len(images))
+	parts = append(parts, openai.TextContentPart(text))
+	for _, im := range images {
+		parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+			URL: imageDataURL(im),
+		}))
+	}
+	return openai.UserMessage(parts)
+}

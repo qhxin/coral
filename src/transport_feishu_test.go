@@ -7,10 +7,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 func TestFeishuQuickAckParse_full(t *testing.T) {
@@ -53,6 +56,16 @@ func TestFeishuQuickAckModeString_all(t *testing.T) {
 	}
 	if feishuQuickAckModeString(feishuQuickAckMode(99)) != "unknown" {
 		t.Fatal()
+	}
+}
+
+func TestFeishuParseImageKey(t *testing.T) {
+	k, err := feishuParseImageKey(`{"image_key":"img-v1abc"}`)
+	if err != nil || k != "img-v1abc" {
+		t.Fatal(k, err)
+	}
+	if _, err := feishuParseImageKey(""); err == nil {
+		t.Fatal("expect error")
 	}
 }
 
@@ -205,5 +218,181 @@ func TestRunFeishuWS_injected(t *testing.T) {
 	}
 	if err := runFeishuWS(&AgentCore{}); err == nil || !strings.Contains(err.Error(), "stub-stop") {
 		t.Fatal(err)
+	}
+}
+
+func spFeishu(s string) *string { return &s }
+
+func TestFeishuOnMessageReceive_earlyExits(t *testing.T) {
+	h := &feishuMsgHandler{groupAtOnly: true}
+	user := "user"
+	app := "app"
+	cid := "chat-1"
+	mtText := "text"
+	mtGroup := "group"
+	mtFile := "file"
+	good := `{"text":"hello"}`
+	bad := `{`
+
+	ev := &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{
+		Sender:  &larkim.EventSender{SenderType: &app},
+		Message: &larkim.EventMessage{ChatId: &cid, MessageType: &mtText, Content: &good},
+	}}
+	if err := h.onMessageReceive(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+
+	emptyCid := ""
+	ev2 := &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{
+		Sender:  &larkim.EventSender{SenderType: &user},
+		Message: &larkim.EventMessage{ChatId: &emptyCid, MessageType: &mtText, Content: &good},
+	}}
+	if err := h.onMessageReceive(context.Background(), ev2); err != nil {
+		t.Fatal(err)
+	}
+
+	ev3 := &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{
+		Sender: &larkim.EventSender{SenderType: &user},
+		Message: &larkim.EventMessage{
+			ChatId: &cid, ChatType: &mtGroup, MessageType: &mtText,
+			Content: &good,
+		},
+	}}
+	if err := h.onMessageReceive(context.Background(), ev3); err != nil {
+		t.Fatal(err)
+	}
+
+	ev4 := &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{
+		Sender:  &larkim.EventSender{SenderType: &user},
+		Message: &larkim.EventMessage{ChatId: &cid, MessageType: &mtText, Content: &bad},
+	}}
+	if err := h.onMessageReceive(context.Background(), ev4); err != nil {
+		t.Fatal(err)
+	}
+
+	blanks := `{"text":"  "}`
+	ev5 := &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{
+		Sender:  &larkim.EventSender{SenderType: &user},
+		Message: &larkim.EventMessage{ChatId: &cid, MessageType: &mtText, Content: &blanks},
+	}}
+	if err := h.onMessageReceive(context.Background(), ev5); err != nil {
+		t.Fatal(err)
+	}
+
+	emptyImg := `{"image_key":""}`
+	mtImg := "image"
+	ev6 := &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{
+		Sender:  &larkim.EventSender{SenderType: &user},
+		Message: &larkim.EventMessage{ChatId: &cid, MessageType: &mtImg, Content: &emptyImg},
+	}}
+	if err := h.onMessageReceive(context.Background(), ev6); err != nil {
+		t.Fatal(err)
+	}
+
+	ev7 := &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{
+		Sender:  &larkim.EventSender{SenderType: &user},
+		Message: &larkim.EventMessage{ChatId: &cid, MessageType: &mtFile, Content: &good},
+	}}
+	if err := h.onMessageReceive(context.Background(), ev7); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFeishuOnMessageReceive_textStartsWorker(t *testing.T) {
+	var n atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{}}`))
+	}))
+	t.Cleanup(api.Close)
+	cli := lark.NewClient("a", "b",
+		lark.WithOpenBaseUrl(api.URL),
+		lark.WithHttpClient(api.Client()),
+		lark.WithEnableTokenCache(false),
+	)
+	llm := newTestOpenAIServer(t, completionJSON("feishu答复", ""))
+	t.Cleanup(llm.Close)
+	agent := NewAgentCore(newStubOpenAIClient(t, llm.URL, "m", 1), "sys", "", nil, 8000, 500)
+	h := &feishuMsgHandler{agent: agent, httpCli: cli}
+	user := "user"
+	cid := "c-work"
+	mt := "text"
+	co := `{"text":"你好"}`
+	mid := "m1"
+	ctp := "p2p"
+	ev := &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{
+		Sender: &larkim.EventSender{SenderType: &user},
+		Message: &larkim.EventMessage{
+			MessageId: spFeishu(mid), ChatId: spFeishu(cid), ChatType: &ctp,
+			MessageType: &mt, Content: &co,
+		},
+	}}
+	if err := h.onMessageReceive(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for n.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n.Load() < 1 {
+		t.Fatal("expected outbound Feishu API call")
+	}
+}
+
+func TestFeishuOnMessageReceive_quickAckTextWhenSet(t *testing.T) {
+	var n atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{}}`))
+	}))
+	t.Cleanup(api.Close)
+	cli := lark.NewClient("a", "b",
+		lark.WithOpenBaseUrl(api.URL),
+		lark.WithHttpClient(api.Client()),
+		lark.WithEnableTokenCache(false),
+	)
+	llm := newTestOpenAIServer(t, completionJSON("r", ""))
+	t.Cleanup(llm.Close)
+	agent := NewAgentCore(newStubOpenAIClient(t, llm.URL, "m", 1), "", "", nil, 8000, 500)
+	h := &feishuMsgHandler{
+		agent:         agent,
+		httpCli:       cli,
+		quickAckMode:  feishuQuickAckText,
+		quickAckText:  "稍等",
+	}
+	user := "user"
+	cid := "c2"
+	mt := "text"
+	co := `{"text":"m"}`
+	ev := &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{
+		Sender: &larkim.EventSender{SenderType: &user},
+		Message: &larkim.EventMessage{
+			ChatId: spFeishu(cid), MessageType: &mt, Content: &co,
+		},
+	}}
+	if err := h.onMessageReceive(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for n.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n.Load() < 1 {
+		t.Fatal("expected quick ack message")
+	}
+}
+
+func TestFeishuDownloadMessageImage_emptyArgs(t *testing.T) {
+	h := &feishuMsgHandler{}
+	if _, err := h.feishuDownloadMessageImage(context.Background(), "", "k"); err == nil {
+		t.Fatal()
+	}
+	if _, err := h.feishuDownloadMessageImage(context.Background(), "mid", ""); err == nil {
+		t.Fatal()
+	}
+	if _, err := h.feishuDownloadMessageImage(context.Background(), "  ", "  "); err == nil {
+		t.Fatal()
 	}
 }

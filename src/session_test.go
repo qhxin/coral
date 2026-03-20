@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -185,5 +187,123 @@ func TestAppendToSessionFiles(t *testing.T) {
 	}
 	if err := appendToSessionFiles(nil, "t1", u, a, now); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSaveInboundMediaIfEnabled(t *testing.T) {
+	if saveInboundMediaIfEnabled(nil, "s", nil) != nil {
+		t.Fatal()
+	}
+	t.Setenv(envSaveInboundMedia, "1")
+	root := t.TempDir()
+	fs := &WorkspaceFS{Root: root}
+	png := []byte{0x89, 0x50, 0x4e, 0x47}
+	paths := saveInboundMediaIfEnabled(fs, "u1", []UserImage{{MIME: "image/png", Data: png}})
+	if len(paths) != 1 {
+		t.Fatal(paths)
+	}
+	if _, err := os.ReadFile(filepath.Join(root, paths[0])); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envSaveInboundMedia, "")
+	if n := len(saveInboundMediaIfEnabled(fs, "u1", []UserImage{{Data: png}})); n != 0 {
+		t.Fatal(n)
+	}
+}
+
+func TestWriteSessionMessages_writeFails(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "rootfile")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs := &WorkspaceFS{Root: f}
+	err := writeSessionMessages(fs, "sessions/x/m.json", []ChatMessage{{Role: "user", Content: "c"}})
+	if err == nil {
+		t.Fatal("expected write error")
+	}
+}
+
+func TestAppendToSessionFiles_weeklyInvalidJSON(t *testing.T) {
+	root := t.TempDir()
+	fs := &WorkspaceFS{Root: root}
+	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+	wpath := filepath.Join(sessionDir("bad"), weeklyFilename(now))
+	if err := fs.Write(wpath, `not json`); err != nil {
+		t.Fatal(err)
+	}
+	agent := &AgentCore{FS: fs}
+	err := appendToSessionFiles(agent, "bad", newUserMessage("u", now, nil), newAssistantMessage("a", now, nil), now)
+	if err == nil {
+		t.Fatal("expected error from invalid weekly json")
+	}
+}
+
+func TestSummarizeMessagesWithLLM_apiError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	now := time.Now()
+	old := now.AddDate(0, 0, -1)
+	msgs := []ChatMessage{
+		{Role: "user", Content: "x", Metadata: map[string]interface{}{"timestamp": old.Format(time.RFC3339)}},
+	}
+	agent := &AgentCore{Client: newStubOpenAIClient(t, srv.URL, "m", 1)}
+	_, _, _, err := summarizeMessagesWithLLM(agent, msgs, now)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestSummarizeMessagesWithLLM_emptyChoices(t *testing.T) {
+	srv := newTestOpenAIServer(t, completionJSONEmptyChoices())
+	t.Cleanup(srv.Close)
+	now := time.Now()
+	old := now.AddDate(0, 0, -1)
+	msgs := []ChatMessage{
+		{Role: "user", Content: "x", Metadata: map[string]interface{}{"timestamp": old.Format(time.RFC3339)}},
+	}
+	agent := &AgentCore{Client: newStubOpenAIClient(t, srv.URL, "m", 1)}
+	s, _, _, err := summarizeMessagesWithLLM(agent, msgs, now)
+	if err == nil || s != "" {
+		t.Fatalf("want ChatOnce error on empty choices, got err=%v s=%q", err, s)
+	}
+}
+
+func TestSummarizeMessagesWithLLM_rolesInHistory(t *testing.T) {
+	srv := newTestOpenAIServer(t, completionJSON("摘要ok", ""))
+	t.Cleanup(srv.Close)
+	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+	old := now.AddDate(0, 0, -10)
+	msgs := []ChatMessage{
+		{Role: "assistant", Content: "a1", Metadata: map[string]interface{}{"timestamp": old.Format(time.RFC3339)}},
+		{Role: "user", Content: "u1", Metadata: map[string]interface{}{"timestamp": old.Format(time.RFC3339)}},
+	}
+	agent := &AgentCore{Client: newStubOpenAIClient(t, srv.URL, "m", 1)}
+	s, _, _, err := summarizeMessagesWithLLM(agent, msgs, now)
+	if err != nil || !strings.Contains(s, "摘要ok") {
+		t.Fatal(err, s)
+	}
+}
+
+func TestCompactActiveMessages_summarizeAPIErrorKeepsRecent(t *testing.T) {
+	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+	old := now.AddDate(0, 0, -30)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	cli := newStubOpenAIClient(t, srv.URL, "m", 2)
+	agent := &AgentCore{Client: cli, SummaryWindowDays: 7}
+	msgs := []ChatMessage{
+		{Role: "user", Content: "ancient", Metadata: map[string]interface{}{"timestamp": old.Format(time.RFC3339)}},
+		{Role: "user", Content: "fresh", Metadata: map[string]interface{}{"timestamp": now.Format(time.RFC3339)}},
+	}
+	out, err := compactActiveMessages(agent, msgs, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].Content != "fresh" {
+		t.Fatalf("%+v", out)
 	}
 }

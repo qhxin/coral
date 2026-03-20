@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -92,6 +94,26 @@ func writeSessionMessages(fs *WorkspaceFS, relPath string, msgs []ChatMessage) e
 		return err
 	}
 	return nil
+}
+
+// saveInboundMediaIfEnabled 在 CORVAL_SAVE_INBOUND_MEDIA 开启时将图片写入 workspace 并返回相对路径列表。
+func saveInboundMediaIfEnabled(fs *WorkspaceFS, sessionID string, images []UserImage) []string {
+	if fs == nil || !saveInboundMediaEnabled() || len(images) == 0 {
+		return nil
+	}
+	var out []string
+	for i := range images {
+		im := images[i]
+		sum := sha256.Sum256(im.Data)
+		name := fmt.Sprintf("in-%s-%d%s", hex.EncodeToString(sum[:8]), i, extensionForImageMime(im.MIME))
+		rel := filepath.Join(sessionDir(sessionID), "media", name)
+		if err := fs.Write(rel, string(im.Data)); err != nil {
+			log.Printf("warn: saveInboundMediaIfEnabled %s: %v", rel, err)
+			continue
+		}
+		out = append(out, rel)
+	}
+	return out
 }
 
 // newUserMessage 构造带时间戳的 user 消息。

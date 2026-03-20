@@ -94,3 +94,26 @@ func TestFeishuPostMessageChunks_splitLong(t *testing.T) {
 		}
 	}
 }
+
+func TestFeishuPostMessageChunks_inlineRich(t *testing.T) {
+	md := "![duck](https://x.test/a.png)\n\n" +
+		"**bold** *italic* `code` and [u](https://z)\n\n" +
+		"line1  \nline2\n\n" +
+		"<b>raw</b>\n\n" +
+		"1. one\n2. two\n"
+	chunks, err := feishuPostMessageChunks(md)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := strings.Join(chunks, "")
+	if !strings.Contains(raw, "[图片:") || !strings.Contains(raw, "raw") {
+		t.Fatal(raw[:min(200, len(raw))])
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

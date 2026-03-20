@@ -11,3 +11,4 @@ env_help_gen.go
 # Go 覆盖率产出
 coverage.out
 coverage
+cover

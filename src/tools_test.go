@@ -20,7 +20,7 @@ func TestShouldForceMemoryTool(t *testing.T) {
 		t.Fatal()
 	}
 	if shouldForceMemoryTool("随便聊聊") {
-		t.Fatal()
+		t.Fatal()
 	}
 }
 
@@ -92,6 +92,36 @@ func TestDispatchToolsOpenAI(t *testing.T) {
 	}
 
 	raw = `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c3","type":"function","function":{"name":"workspace_read_file","arguments":"{\"path\":\"\"}"}}]}}]}`
+	res = dispatchToolsOpenAI(toolCallsFromJSON(t, raw), exec)
+	if len(res) != 1 || res[0].Error == "" {
+		t.Fatalf("%+v", res)
+	}
+
+	raw = `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c4","type":"function","function":{"name":"workspace_write_file","arguments":"not-json"}}]}}]}`
+	res = dispatchToolsOpenAI(toolCallsFromJSON(t, raw), exec)
+	if len(res) != 1 || res[0].Error == "" {
+		t.Fatalf("%+v", res)
+	}
+
+	raw = `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c5","type":"function","function":{"name":"workspace_write_file","arguments":"{}"}}]}}]}`
+	res = dispatchToolsOpenAI(toolCallsFromJSON(t, raw), exec)
+	if len(res) != 1 || res[0].Error == "" {
+		t.Fatalf("%+v", res)
+	}
+
+	raw = `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c6","type":"function","function":{"name":"memory_write_important","arguments":"{\"content\":\"\"}"}}]}}]}`
+	res = dispatchToolsOpenAI(toolCallsFromJSON(t, raw), exec)
+	if len(res) != 1 || res[0].Error == "" {
+		t.Fatalf("%+v", res)
+	}
+
+	raw = `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c7","type":"function","function":{"name":"memory_write_important","arguments":"not-json"}}]}}]}`
+	res = dispatchToolsOpenAI(toolCallsFromJSON(t, raw), exec)
+	if len(res) != 1 || res[0].Error == "" {
+		t.Fatalf("%+v", res)
+	}
+
+	raw = `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c8","type":"function","function":{"name":"workspace_read_file","arguments":"{\"path\":\"missing.txt\"}"}}]}}]}`
 	res = dispatchToolsOpenAI(toolCallsFromJSON(t, raw), exec)
 	if len(res) != 1 || res[0].Error == "" {
 		t.Fatalf("%+v", res)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -121,18 +122,30 @@ func (h *feishuMsgHandler) onMessageReceive(ctx context.Context, event *larkim.P
 	}
 
 	mt := strPtr(msg.MessageType)
-	if mt != "text" {
+	sess := "feishu-chat-" + chatID
+	msgID := strPtr(msg.MessageId)
+
+	var userText string
+	var imageKey string
+
+	switch mt {
+	case "text":
+		t, err := feishuParseTextContent(strPtr(msg.Content))
+		if err != nil || strings.TrimSpace(t) == "" {
+			return nil
+		}
+		userText = strings.TrimSpace(t)
+	case "image":
+		key, err := feishuParseImageKey(strPtr(msg.Content))
+		if err != nil || strings.TrimSpace(key) == "" {
+			log.Printf("feishu: skip image (bad content) chat_id=%s err=%v", chatID, err)
+			return nil
+		}
+		imageKey = strings.TrimSpace(key)
+	default:
 		log.Printf("feishu: skip message_type=%s chat_id=%s", mt, chatID)
 		return nil
 	}
-	userText, err := feishuParseTextContent(strPtr(msg.Content))
-	if err != nil || strings.TrimSpace(userText) == "" {
-		return nil
-	}
-	userText = strings.TrimSpace(userText)
-
-	sess := "feishu-chat-" + chatID
-	msgID := strPtr(msg.MessageId)
 
 	switch h.quickAckMode {
 	case feishuQuickAckReactionThumbsUp:
@@ -149,9 +162,19 @@ func (h *feishuMsgHandler) onMessageReceive(ctx context.Context, event *larkim.P
 
 	go func() {
 		bg := context.Background()
-		reply, err := h.agent.HandleWithSession(sess, userText)
+		var images []UserImage
+		if mt == "image" {
+			data, err := h.feishuDownloadMessageImage(bg, msgID, imageKey)
+			if err != nil {
+				log.Printf("feishu: download image failed: %v (chat=%s msg=%s)", err, chatID, msgID)
+				_ = h.sendTextMessage(bg, chatID, "获取图片失败："+err.Error())
+				return
+			}
+			images = []UserImage{{Data: data}}
+		}
+		reply, err := h.agent.HandleWithSessionWithMedia(sess, userText, images)
 		if err != nil {
-			log.Printf("feishu: HandleWithSession error: %v (chat=%s msg=%s user_in=%q)", err, chatID, msgID, userText)
+			log.Printf("feishu: HandleWithSessionWithMedia error: %v (chat=%s msg=%s user_in=%q)", err, chatID, msgID, userText)
 			_ = h.sendTextMessage(bg, chatID, "处理出错："+err.Error())
 			return
 		}
@@ -160,6 +183,48 @@ func (h *feishuMsgHandler) onMessageReceive(ctx context.Context, event *larkim.P
 		}
 	}()
 	return nil
+}
+
+func feishuParseImageKey(contentJSON string) (string, error) {
+	contentJSON = strings.TrimSpace(contentJSON)
+	if contentJSON == "" {
+		return "", fmt.Errorf("empty content")
+	}
+	var m struct {
+		ImageKey string `json:"image_key"`
+	}
+	if err := json.Unmarshal([]byte(contentJSON), &m); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(m.ImageKey), nil
+}
+
+func (h *feishuMsgHandler) feishuDownloadMessageImage(ctx context.Context, messageID, imageKey string) ([]byte, error) {
+	messageID = strings.TrimSpace(messageID)
+	imageKey = strings.TrimSpace(imageKey)
+	if messageID == "" || imageKey == "" {
+		return nil, fmt.Errorf("empty message_id or image_key")
+	}
+	req := larkim.NewGetMessageResourceReqBuilder().
+		MessageId(messageID).
+		FileKey(imageKey).
+		Type("image").
+		Build()
+	resp, err := h.httpCli.Im.MessageResource.Get(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || !resp.Success() {
+		code, s := 0, ""
+		if resp != nil {
+			code, s = resp.Code, resp.Msg
+		}
+		return nil, fmt.Errorf("im message resource get: code=%d msg=%s", code, s)
+	}
+	if resp.File == nil {
+		return nil, fmt.Errorf("empty image body")
+	}
+	return io.ReadAll(resp.File)
 }
 
 func feishuParseTextContent(contentJSON string) (string, error) {
