@@ -1,4 +1,7 @@
 #!/bin/sh
+# 统计 Go 代码行（用内嵌 awk 去掉空行与注释）。
+# 排除：目录 build/、.cursor/、vendor/；所有单元测试文件 *_test.go；生成文件 env_help_gen.go。
+# 仅统计某子树： COUNT_GO_ROOT=src ./shells/count-go-loc.sh
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -6,8 +9,10 @@ ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 cd "$ROOT_DIR"
 
 README_PATH=${1:-README.md}
+# 搜索起点，默认仓库根；例：COUNT_GO_ROOT=src
+SEARCH_ROOT=${COUNT_GO_ROOT:-.}
 
-echo "===> Counting Go LOC (excluding: build/, .cursor/, vendor/, *_test.go, env_help_gen.go)"
+echo "===> Counting Go LOC under ${SEARCH_ROOT} (excluding: build/, .cursor/, vendor/, *_test.go, env_help_gen.go)"
 
 if [ ! -f "$README_PATH" ]; then
   echo "README not found at: $README_PATH" >&2
@@ -17,8 +22,8 @@ fi
 tmpfile="${TMPDIR:-/tmp}/coral-go-loc.$$"
 trap 'rm -f "$tmpfile"' EXIT INT HUP TERM
 
-# Collect file list.
-find . \
+# 收集 .go 文件列表（显式排除 Go 单元测试命名约定 *_test.go）
+find "$SEARCH_ROOT" \
   -type d \( -name build -o -name .cursor -o -name vendor \) -prune -o \
   -type f -name '*.go' ! -name '*_test.go' ! -name 'env_help_gen.go' -print >"$tmpfile"
 

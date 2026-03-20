@@ -8,6 +8,7 @@ Coral Agent 是一个用 Go 编写的轻量命令行 Agent：通过 **OpenAI 兼
 - **本地 workspace**：自动初始化 `AGENT.md / USER.md / MEMORY.md`，并把会话历史写入 `workspace/sessions/`。
 - **工具调用**：暴露 `workspace_read_file / workspace_write_file / memory_write_important` 等工具给模型调用。
 - **帮助信息**：`--help/-h` 自动汇总 CLI 参数与环境变量说明（环境变量说明由 `.env.template` 在构建期生成）。
+- **飞书机器人（长连接）**：`--feishu` 使用官方 WebSocket 通道接收 `im.message.receive_v1`，按聊天 `chat_id` 映射会话；模型回复优先以 **post 富文本** 发送以呈现 Markdown 结构（标题/列表/粗斜体/链接/代码样式等），失败时降级为纯文本。需企业自建应用并开通机器人能力与相关 IM 权限。
 
 ## 快速开始（跨平台：macOS / Linux / Windows）
 
@@ -37,13 +38,28 @@ sh ./shells/run.sh
 ./build/coral --workspace /path/to/workspace
 ```
 
+飞书长连接模式（需设置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`，并在开放平台完成「使用长连接接收事件」与事件订阅）：
+
+```sh
+export FEISHU_APP_ID=cli_xxx
+export FEISHU_APP_SECRET=xxx
+./build/coral --feishu --workspace /path/to/workspace
+```
+
+说明：
+
+- 会话目录为 `sessions/feishu-chat-<chat_id>/`，与 CLI 默认会话隔离。
+- `FEISHU_QUICK_ACK_TEXT`：**留空**或 **`false` / `0`** 则不立即响应；**`true` / `1`** 时对用户本条消息添加点赞类表情（`THUMBSUP`）；**其它字符串**则先发该文案再异步生成完整内容。需在开放平台开通消息表情回复相关权限（若使用点赞模式）。
+- `FEISHU_GROUP_AT_ONLY=1` 时，仅当飞书事件里 `mentions` 非空才回复（常用于群内需 @ 机器人的场景）。
+- **Markdown 渲染**为向飞书 post 结构的映射，复杂表格/Mermaid 等可能等价度有限；极长内容会自动拆成多条消息。
+
 ## 代码行数（Go）
 
 <!-- LOC:START -->
-Updated at: 2026-03-20 15:40:58
+Updated at: 2026-03-20 18:32:55
 
-- Go files: 13
-- Go LOC (code lines, excludes blanks & comments): 1317
+- Go files: 16
+- Go LOC (code lines, excludes blanks & comments): 2249
 <!-- LOC:END -->
 
 统计并更新本文件：
@@ -54,7 +70,7 @@ sh ./shells/count-go-loc.sh
 
 ## 开发脚本
 
-- `shells/build-all.sh`：使用 `CGO_ENABLED=0` 交叉编译生成多平台产物（含 `windows/x86`、`linux/x86`），输出到 `build/`。
+- `shells/build-all.sh`：使用 `CGO_ENABLED=0` 交叉编译生成多平台产物（`windows/amd64`、`linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64`；不含 32 位：依赖的飞书 SDK 在 `GOARCH=386` 下无法通过编译），输出到 `build/`。
 - `shells/run.sh`：从 `.env` 加载配置（如有），并自动选择 `build/` 下与当前平台匹配的产物运行（若没有匹配产物则提示先执行 `build-all.sh`）。
 - `shells/check-time.sh`：静态检查，禁止直接使用 `time.Now()`（要求用 `Now()`）。
 - `shells/count-go-loc.sh`：统计 Go 代码行数并更新 `README.md`。

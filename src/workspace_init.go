@@ -33,9 +33,9 @@ func parseWorkspacePath(args []string) (string, error) {
 	return abs, nil
 }
 
-// resolveWorkspaceDir 解析最终的 workspace 目录，若未指定则基于可执行文件所在目录。
-func resolveWorkspaceDir() (string, error) {
-	ws, err := parseWorkspacePath(os.Args[1:])
+// resolveWorkspaceDirFromArgs 根据 argv 切片解析 workspace；未指定时基于可执行文件目录。
+func resolveWorkspaceDirFromArgs(args []string) (string, error) {
+	ws, err := parseWorkspacePath(args)
 	if err != nil {
 		return "", err
 	}
@@ -48,6 +48,21 @@ func resolveWorkspaceDir() (string, error) {
 	}
 	exeDir := filepath.Dir(exePath)
 	return filepath.Join(exeDir, "workspace"), nil
+}
+
+// resolveWorkspaceDir 解析最终的 workspace 目录（使用 os.Args[1:]）。
+func resolveWorkspaceDir() (string, error) {
+	return resolveWorkspaceDirFromArgs(os.Args[1:])
+}
+
+// parseFeishuMode 判断是否启用飞书长连接模式。
+func parseFeishuMode(args []string) bool {
+	for _, arg := range args {
+		if arg == "--feishu" {
+			return true
+		}
+	}
+	return false
 }
 
 // initWorkspace 创建 workspace 目录及关键文件，并返回三个文件路径。

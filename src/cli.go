@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -24,6 +25,12 @@ var cliOptions = []CLIOption{
 		Description: "指定 workspace 目录（默认为可执行文件同级 workspace 子目录）",
 	},
 	{
+		Long:        "feishu",
+		Short:       "",
+		ArgName:     "",
+		Description: "以飞书自建应用长连接(WebSocket)模式运行，需 FEISHU_APP_ID / FEISHU_APP_SECRET",
+	},
+	{
 		Long:        "help",
 		Short:       "h",
 		ArgName:     "",
@@ -43,11 +50,15 @@ func isHelpRequested(args []string) bool {
 
 // printHelp 打印 coral 程序的帮助信息，包括所有已注册的 CLI 参数。
 func printHelp() {
-	exe := filepath.Base(os.Args[0])
-	fmt.Printf("Coral - Minimal Go Agent (OpenAI JSON + local llama-server/Qwen)\n\n")
-	fmt.Printf("用法:\n")
-	fmt.Printf("  %s [选项]\n\n", exe)
-	fmt.Printf("选项:\n")
+	printHelpTo(os.Stdout, filepath.Base(os.Args[0]))
+}
+
+// printHelpTo 将帮助信息写入 w（exe 为展示用的程序名）。
+func printHelpTo(w io.Writer, exe string) {
+	fmt.Fprintf(w, "Coral - Minimal Go Agent (OpenAI JSON + local llama-server/Qwen)\n\n")
+	fmt.Fprintf(w, "用法:\n")
+	fmt.Fprintf(w, "  %s [选项]\n\n", exe)
+	fmt.Fprintf(w, "选项:\n")
 	for _, opt := range cliOptions {
 		longForm := "--" + opt.Long
 		shortForm := ""
@@ -70,20 +81,20 @@ func printHelp() {
 			namePart += " " + opt.ArgName
 		}
 
-		fmt.Printf("  %-28s %s\n", namePart, opt.Description)
+		fmt.Fprintf(w, "  %-28s %s\n", namePart, opt.Description)
 	}
 
-	fmt.Println()
-	fmt.Println("环境变量（构建时从 .env.template 解析）：")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "环境变量（构建时从 .env.template 解析）：")
 	if len(envVarHelps) == 0 {
-		fmt.Println("  (无可用环境变量说明，请检查 .env.template 并重新构建)")
+		fmt.Fprintln(w, "  (无可用环境变量说明，请检查 .env.template 并重新构建)")
 	} else {
 		for _, h := range envVarHelps {
 			desc := h.Description
 			if desc == "" {
 				desc = "(无说明，详见 .env.template)"
 			}
-			fmt.Printf("  %-28s %s\n", h.Name, desc)
+			fmt.Fprintf(w, "  %-28s %s\n", h.Name, desc)
 		}
 	}
 }

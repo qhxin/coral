@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // dailyFileLogger 实现按天切分的文件日志写入器，所有 log.Printf 将写入 workspace/logs 目录下的当天文件。
@@ -12,6 +13,8 @@ type dailyFileLogger struct {
 	currentDate string
 	file        *os.File
 	mu          sync.Mutex
+	// now 非 nil 时用于日期分卷（单测）；默认使用 Now()。
+	now func() time.Time
 }
 
 // newDailyFileLogger 创建一个基于 workspace/logs 目录的按天归档日志写入器。
@@ -24,7 +27,11 @@ func (l *dailyFileLogger) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	today := Now().Format("2006-01-02")
+	nowFn := l.now
+	if nowFn == nil {
+		nowFn = Now
+	}
+	today := nowFn().Format("2006-01-02")
 	if err := os.MkdirAll(l.baseDir, 0o755); err != nil {
 		return 0, err
 	}
@@ -44,5 +51,17 @@ func (l *dailyFileLogger) Write(p []byte) (int, error) {
 	}
 
 	return l.file.Write(p)
+}
+
+// Close 关闭当前日志文件（用于测试或进程退出时释放句柄）。
+func (l *dailyFileLogger) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.file == nil {
+		return nil
+	}
+	err := l.file.Close()
+	l.file = nil
+	return err
 }
 

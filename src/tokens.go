@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -34,6 +35,84 @@ func getEncoder() (*tiktoken.Tiktoken, error) {
 }
 
 // estimateTokensSimple 使用 tiktoken 对一组 SimpleMsg 精确估算 token 数。
+func estimateTokensJSONChunks(parts [][]byte) int {
+	enc, err := getEncoder()
+	if err != nil {
+		n := 0
+		for _, p := range parts {
+			n += len(p) / 4
+		}
+		if n < 1 && len(parts) > 0 {
+			return 1
+		}
+		return n
+	}
+	total := 0
+	for _, p := range parts {
+		ids := enc.Encode(string(p), nil, nil)
+		total += len(ids)
+	}
+	return total
+}
+
+// estimateChatRequestInputTokens 用请求 JSON（与 cl100k_base）估算消息与 tools 的 token，供日志使用。
+func estimateChatRequestInputTokens(messages []openai.ChatCompletionMessageParamUnion, tools []openai.ChatCompletionToolUnionParam) (msgTok int, toolTok int, sum int) {
+	msgParts := make([][]byte, 0, len(messages))
+	for _, m := range messages {
+		b, err := json.Marshal(m)
+		if err != nil {
+			continue
+		}
+		msgParts = append(msgParts, b)
+	}
+	msgTok = estimateTokensJSONChunks(msgParts)
+	toolParts := make([][]byte, 0, len(tools))
+	for _, t := range tools {
+		b, err := json.Marshal(t)
+		if err != nil {
+			continue
+		}
+		toolParts = append(toolParts, b)
+	}
+	toolTok = estimateTokensJSONChunks(toolParts)
+	return msgTok, toolTok, msgTok + toolTok
+}
+
+func classifyChatMessageRole(m openai.ChatCompletionMessageParamUnion) string {
+	switch {
+	case m.OfDeveloper != nil:
+		return "developer"
+	case m.OfSystem != nil:
+		return "system"
+	case m.OfUser != nil:
+		return "user"
+	case m.OfAssistant != nil:
+		return "assistant"
+	case m.OfTool != nil:
+		return "tool"
+	case m.OfFunction != nil:
+		return "function"
+	default:
+		return "unknown"
+	}
+}
+
+// chatMessagesRoleSummary 统计各 role 条数，如 system:1,user:3,assistant:2。
+func chatMessagesRoleSummary(messages []openai.ChatCompletionMessageParamUnion) string {
+	order := []string{"developer", "system", "user", "assistant", "tool", "function", "unknown"}
+	counts := make(map[string]int)
+	for _, m := range messages {
+		counts[classifyChatMessageRole(m)]++
+	}
+	var parts []string
+	for _, role := range order {
+		if n := counts[role]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d", role, n))
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
 func estimateTokensSimple(msgs []SimpleMsg) int {
 	encoder, err := getEncoder()
 	if err != nil {
@@ -152,7 +231,8 @@ func summarizeSimpleChunkWithLLM(agent *AgentCore, chunk []SimpleMsg) (SimpleMsg
 	defer cancel()
 
 	// 摘要本身也使用较小的输出上限（例如 256），不必占用过多 token。
-	resp, err := agent.Client.ChatOnce(ctx, []openai.ChatCompletionMessageParamUnion{sys, user}, nil, 256, "", "")
+	llmMeta := newLLMRequestLogMetaFromAgent(agent, "history_reduce_chunk", 256)
+	resp, err := agent.Client.ChatOnce(ctx, []openai.ChatCompletionMessageParamUnion{sys, user}, nil, 256, "", "", llmMeta)
 	if err != nil {
 		return SimpleMsg{}, err
 	}

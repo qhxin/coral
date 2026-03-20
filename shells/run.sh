@@ -112,5 +112,6 @@ if [ -z "$EXE" ]; then
 fi
 
 echo "===> Starting Coral agent..."
-exec "$EXE"
+# 透传命令行参数，例如: sh ./shells/run.sh --feishu -w /path/to/workspace
+exec "$EXE" "$@"
 

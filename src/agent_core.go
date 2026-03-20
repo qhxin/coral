@@ -140,6 +140,7 @@ func (a *AgentCore) HandleWithSession(sessionID, userInput string) (string, erro
 	forceMemory := shouldForceMemoryTool(userInput)
 
 	hadToolError := false
+	toolRound := 0
 	for {
 		toolChoice := "auto"
 		forceFunction := ""
@@ -150,7 +151,16 @@ func (a *AgentCore) HandleWithSession(sessionID, userInput string) (string, erro
 			toolChoice = "required"
 		}
 
-		resp, err := a.Client.ChatOnce(ctx, messages, tools, a.MaxOutputTokens, toolChoice, forceFunction)
+		llmMeta := &LLMRequestLogMeta{
+			SessionID:         sessionID,
+			CallLabel:         "agent",
+			InputBudgetTokens: effectiveLimit,
+			MaxContextTokens:  a.MaxContextTokens,
+			MaxOutputTokens:   a.MaxOutputTokens,
+			ToolRound:         toolRound,
+		}
+		resp, err := a.Client.ChatOnce(ctx, messages, tools, a.MaxOutputTokens, toolChoice, forceFunction, llmMeta)
+		toolRound++
 		if err != nil {
 			return "", err
 		}

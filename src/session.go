@@ -276,7 +276,8 @@ func summarizeMessagesWithLLM(agent *AgentCore, msgs []ChatMessage, now time.Tim
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	resp, err := agent.Client.ChatOnce(ctx, []openai.ChatCompletionMessageParamUnion{sys, user}, nil, 256, "", "")
+	llmMeta := newLLMRequestLogMetaFromAgent(agent, "session_weekly_summary", 256)
+	resp, err := agent.Client.ChatOnce(ctx, []openai.ChatCompletionMessageParamUnion{sys, user}, nil, 256, "", "", llmMeta)
 	if err != nil {
 		log.Printf("error: summarizeMessagesWithLLM ChatOnce failed: %v", err)
 		return "", from, to, err

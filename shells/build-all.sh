@@ -10,12 +10,13 @@ Outputs into ./build/.
 
 Targets:
   windows/amd64  -> coral-windows-amd64.exe
-  windows/386    -> coral-windows-x86.exe
   linux/amd64    -> coral-linux-amd64
-  linux/386      -> coral-linux-x86
   linux/arm64    -> coral-linux-arm64
   darwin/amd64   -> coral-darwin-amd64
   darwin/arm64   -> coral-darwin-arm64
+
+Note: windows/386 and linux/386 are omitted — github.com/larksuite/oapi-sdk-go/v3
+(service/drive ListFileIterator uses math.MaxInt64 as int, which overflows on 32-bit).
 EOF
 }
 
@@ -123,9 +124,7 @@ build_one() {
 }
 
 build_one windows amd64
-build_one windows 386
 build_one linux amd64
-build_one linux 386
 build_one linux arm64
 build_one darwin amd64
 build_one darwin arm64

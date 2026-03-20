@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"regexp"
@@ -12,10 +13,11 @@ import (
 var corvalLoc *time.Location
 
 // tryParseUTCOffset 尝试解析类似 `UTC+8` / `UTC+08:30` 这类偏移格式。
-func tryParseUTCOffset(tz string) (*time.Location, bool) {
+// 若非 UTC 偏移写法则 ok 为 false 且 err 为 nil；解析到 UTC 但数值非法时返回 err。
+func tryParseUTCOffset(tz string) (loc *time.Location, ok bool, err error) {
 	tz = strings.TrimSpace(tz)
 	if tz == "" {
-		return nil, false
+		return nil, false, nil
 	}
 
 	// 统一大小写后只针对前缀 `UTC` 与符号/数字做匹配。
@@ -23,31 +25,31 @@ func tryParseUTCOffset(tz string) (*time.Location, bool) {
 	re := regexp.MustCompile(`^UTC([+-])(\d{1,2})(?::?(\d{1,2}))?$`)
 	m := re.FindStringSubmatch(upper)
 	if m == nil {
-		return nil, false
+		return nil, false, nil
 	}
 
 	sign := 1
 	if m[1] == "-" {
 		sign = -1
 	}
-	hours, err := strconv.Atoi(m[2])
-	if err != nil {
-		log.Fatalf("fatal: invalid timezone offset hours %q in %q: %v", m[2], tz, err)
+	hours, atoiErr := strconv.Atoi(m[2])
+	if atoiErr != nil {
+		return nil, false, fmt.Errorf("invalid timezone offset hours %q in %q: %w", m[2], tz, atoiErr)
 	}
 	minutes := 0
 	if m[3] != "" {
-		minutes, err = strconv.Atoi(m[3])
-		if err != nil {
-			log.Fatalf("fatal: invalid timezone offset minutes %q in %q: %v", m[3], tz, err)
+		minutes, atoiErr = strconv.Atoi(m[3])
+		if atoiErr != nil {
+			return nil, false, fmt.Errorf("invalid timezone offset minutes %q in %q: %w", m[3], tz, atoiErr)
 		}
 	}
 
 	if hours < 0 || hours > 23 || minutes < 0 || minutes > 59 {
-		log.Fatalf("fatal: timezone offset out of range in %q (hours=%d, minutes=%d)", tz, hours, minutes)
+		return nil, false, fmt.Errorf("timezone offset out of range in %q (hours=%d, minutes=%d)", tz, hours, minutes)
 	}
 
 	offsetSeconds := sign * (hours*3600 + minutes*60)
-	return time.FixedZone(upper, offsetSeconds), true
+	return time.FixedZone(upper, offsetSeconds), true, nil
 }
 
 // corvalLocation 根据环境变量 TIMEZONE 解析并返回时区；
@@ -63,7 +65,9 @@ func corvalLocation() *time.Location {
 		tz = "UTC+8"
 	}
 
-	if loc, ok := tryParseUTCOffset(tz); ok {
+	if loc, ok, parseErr := tryParseUTCOffset(tz); parseErr != nil {
+		log.Fatalf("fatal: %v", parseErr)
+	} else if ok {
 		corvalLoc = loc
 		return corvalLoc
 	}
