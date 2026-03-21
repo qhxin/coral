@@ -59,12 +59,13 @@ func TestNewLLMRequestLogMetaFromAgent(t *testing.T) {
 	}
 	a := &AgentCore{MaxContextTokens: 8000, MaxOutputTokens: 500}
 	m = newLLMRequestLogMetaFromAgent(a, "x", 256)
-	if m.InputBudgetTokens != 7500 || m.MaxContextTokens != 8000 {
-		t.Fatal(m.InputBudgetTokens)
+	want := inputBudgetAfterSlack(7500)
+	if m.InputBudgetTokens != want || m.MaxContextTokens != 8000 {
+		t.Fatal(m.InputBudgetTokens, want)
 	}
 	a = &AgentCore{MaxContextTokens: 100, MaxOutputTokens: 0}
 	m = newLLMRequestLogMetaFromAgent(a, "y", 64)
-	if m.InputBudgetTokens != 100 {
+	if m.InputBudgetTokens != inputBudgetAfterSlack(100) {
 		t.Fatal(m.InputBudgetTokens)
 	}
 }

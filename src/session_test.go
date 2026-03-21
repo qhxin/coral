@@ -286,6 +286,45 @@ func TestSummarizeMessagesWithLLM_rolesInHistory(t *testing.T) {
 	}
 }
 
+func TestMergeSessionSummaryParts_ok(t *testing.T) {
+	srv := newTestOpenAIServer(t, completionJSON("合并摘要", ""))
+	t.Cleanup(srv.Close)
+	agent := &AgentCore{
+		Client:           newStubOpenAIClient(t, srv.URL, "m", 2),
+		MaxContextTokens: 8192,
+	}
+	s, err := mergeSessionSummaryParts(agent, "第一段\n第二段")
+	if err != nil || s != "合并摘要" {
+		t.Fatalf("err=%v s=%q", err, s)
+	}
+}
+
+func TestMergeSessionSummaryParts_truncatesLongInput(t *testing.T) {
+	srv := newTestOpenAIServer(t, completionJSON("短", ""))
+	t.Cleanup(srv.Close)
+	agent := &AgentCore{
+		Client:           newStubOpenAIClient(t, srv.URL, "m", 2),
+		MaxContextTokens: 80,
+	}
+	long := strings.Repeat("字", 500)
+	s, err := mergeSessionSummaryParts(agent, long)
+	if err != nil || s != "短" {
+		t.Fatalf("err=%v s=%q", err, s)
+	}
+}
+
+func TestMergeSessionSummaryParts_apiError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+	agent := &AgentCore{Client: newStubOpenAIClient(t, srv.URL, "m", 2)}
+	_, err := mergeSessionSummaryParts(agent, "x")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestCompactActiveMessages_summarizeAPIErrorKeepsRecent(t *testing.T) {
 	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
 	old := now.AddDate(0, 0, -30)

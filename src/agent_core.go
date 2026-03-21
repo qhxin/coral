@@ -156,6 +156,12 @@ func (a *AgentCore) HandleWithSessionWithMedia(sessionID string, userInput strin
 	messages := simpleMsgsToOpenAI(simpleMsgs, modelUserText, lastUserImages)
 
 	tools := a.asOpenAITools()
+	headKeep := headKeepCountForAgentMessages(a.SystemContent, a.UserProfile)
+	tailKeep := 1
+	inputBudget := 0
+	if effectiveLimit > 0 {
+		inputBudget = inputBudgetAfterSlack(effectiveLimit)
+	}
 
 	forceKey := rawText
 	if forceKey == "" {
@@ -166,6 +172,10 @@ func (a *AgentCore) HandleWithSessionWithMedia(sessionID string, userInput strin
 	hadToolError := false
 	toolRound := 0
 	for {
+		if inputBudget > 0 {
+			messages = trimOpenAIMessagesToBudget(messages, tools, inputBudget, headKeep, tailKeep)
+		}
+
 		toolChoice := "auto"
 		forceFunction := ""
 		if forceMemory {
@@ -175,10 +185,14 @@ func (a *AgentCore) HandleWithSessionWithMedia(sessionID string, userInput strin
 			toolChoice = "required"
 		}
 
+		llmBudgetForLog := effectiveLimit
+		if inputBudget > 0 {
+			llmBudgetForLog = inputBudget
+		}
 		llmMeta := &LLMRequestLogMeta{
 			SessionID:         sessionID,
 			CallLabel:         "agent",
-			InputBudgetTokens: effectiveLimit,
+			InputBudgetTokens: llmBudgetForLog,
 			MaxContextTokens:  a.MaxContextTokens,
 			MaxOutputTokens:   a.MaxOutputTokens,
 			ToolRound:         toolRound,
@@ -205,6 +219,8 @@ func (a *AgentCore) HandleWithSessionWithMedia(sessionID string, userInput strin
 
 		results := dispatchToolsOpenAI(msg.ToolCalls, a.Executors)
 		hadToolError = false
+		messages = append(messages, assistantMessageParamFromCompletion(msg))
+		tailKeep++
 		for _, r := range results {
 			content := r.Content
 			if r.Error != "" {
@@ -215,6 +231,7 @@ func (a *AgentCore) HandleWithSessionWithMedia(sessionID string, userInput strin
 				content += "执行出错: " + r.Error
 			}
 			messages = append(messages, openai.ToolMessage(content, r.CallID))
+			tailKeep++
 		}
 	}
 }

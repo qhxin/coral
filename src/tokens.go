@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	tiktoken "github.com/pkoukk/tiktoken-go"
 	openai "github.com/openai/openai-go/v3"
@@ -138,18 +139,89 @@ func estimateTokensSimple(msgs []SimpleMsg) int {
 }
 
 // ensureContextWithinLimitSimple 使用滚动摘要 reduce 的方式在给定上限下压缩 SimpleMsg。
-// 不直接删除历史，只通过多层摘要折叠到 bounded 窗口内。
+// 不直接删除历史，只通过多层摘要折叠到 bounded 窗口内；失败或仍超限时硬截断，不回退未压缩全文。
 func ensureContextWithinLimitSimple(msgs []SimpleMsg, maxTokens int, agent *AgentCore) []SimpleMsg {
 	if maxTokens <= 0 || agent == nil {
 		return msgs
 	}
 	compressed, err := reduceHistory(msgs, maxTokens, agent)
 	if err != nil {
-		// 失败时记录错误并回退为原始消息，避免影响主流程。
-		log.Printf("error: reduceHistory failed, fallback to original messages: %v", err)
-		return msgs
+		log.Printf("error: reduceHistory failed, apply hard truncate: %v", err)
+		return hardTruncateSimpleMsgsToBudget(msgs, maxTokens)
+	}
+	if estimateTokensSimple(compressed) > maxTokens {
+		return hardTruncateSimpleMsgsToBudget(compressed, maxTokens)
 	}
 	return compressed
+}
+
+// hardTruncateSimpleMsgsToBudget 保留尾部一条与开头连续 system，从其后逐条删除直至 token 不超限，必要时截断尾条。
+func hardTruncateSimpleMsgsToBudget(msgs []SimpleMsg, maxTokens int) []SimpleMsg {
+	if maxTokens <= 0 || len(msgs) == 0 {
+		return msgs
+	}
+	out := append([]SimpleMsg(nil), msgs...)
+	for iter := 0; iter < 4000; iter++ {
+		if estimateTokensSimple(out) <= maxTokens {
+			return out
+		}
+		if len(out) <= 1 {
+			out[0] = truncateSimpleTailForBudget(out[0], maxTokens)
+			return out
+		}
+		tail := out[len(out)-1]
+		prefix := out[:len(out)-1]
+		sysEnd := 0
+		for sysEnd < len(prefix) && prefix[sysEnd].Role == "system" {
+			sysEnd++
+		}
+		if sysEnd >= len(prefix) {
+			out[len(out)-1] = truncateSimpleTailForBudget(tail, maxTokens)
+			return out
+		}
+		prefix = append(append([]SimpleMsg(nil), prefix[:sysEnd]...), prefix[sysEnd+1:]...)
+		out = append(prefix, tail)
+	}
+	if len(out) > 0 {
+		out[len(out)-1] = truncateSimpleTailForBudget(out[len(out)-1], maxTokens)
+	}
+	return out
+}
+
+func truncateSimpleTailForBudget(tail SimpleMsg, maxTokens int) SimpleMsg {
+	t := tail
+	if maxTokens <= 0 {
+		t.Content = "…"
+		t.ImageCount = 0
+		return t
+	}
+	if t.ImageCount > 0 {
+		t.ImageCount = 0
+		t.Content = strings.TrimSpace(t.Content)
+		if !strings.Contains(t.Content, "图片因长度限制") {
+			if t.Content != "" {
+				t.Content += "\n"
+			}
+			t.Content += "（图片因长度限制已省略）"
+		}
+	}
+	for i := 0; i < 800 && estimateTokensSimple([]SimpleMsg{t}) > maxTokens; i++ {
+		rs := []rune(strings.TrimSpace(t.Content))
+		if len(rs) <= 8 {
+			t.Content = "…"
+			break
+		}
+		newLen := len(rs) * 4 / 5
+		if newLen >= len(rs) {
+			newLen = len(rs) - 1
+		}
+		suf := []rune(contextTruncatedSuffix)
+		if newLen <= len(suf) {
+			newLen = len(suf)
+		}
+		t.Content = string(rs[:newLen-len(suf)]) + contextTruncatedSuffix
+	}
+	return t
 }
 
 // reduceHistory 对按时间排序的 simpleMsgs 做多层滚动摘要，确保整体 token 数不超过 windowLimit。
@@ -162,14 +234,17 @@ func reduceHistory(simpleMsgs []SimpleMsg, windowLimit int, agent *AgentCore) ([
 	tail := simpleMsgs[len(simpleMsgs)-1]
 	prefix := simpleMsgs[:len(simpleMsgs)-1]
 
-	for level := 0; level < 4; level++ {
+	const maxLevels = 32
+	for level := 0; level < maxLevels; level++ {
 		cur := append(append([]SimpleMsg{}, prefix...), tail)
 		if estimateTokensSimple(cur) <= windowLimit {
 			return cur, nil
 		}
 		if len(prefix) == 0 {
-			return cur, nil
+			fixed := truncateSimpleTailForBudget(tail, windowLimit)
+			return []SimpleMsg{fixed}, nil
 		}
+		prevTok := estimateTokensSimple(prefix)
 		chunks := splitIntoChunks(prefix, windowLimit)
 		summaries := make([]SimpleMsg, 0, len(chunks))
 		for _, chunk := range chunks {
@@ -187,9 +262,17 @@ func reduceHistory(simpleMsgs []SimpleMsg, windowLimit int, agent *AgentCore) ([
 		if len(summaries) == 0 {
 			break
 		}
+		newTok := estimateTokensSimple(summaries)
+		if newTok >= prevTok && len(summaries) >= len(prefix) {
+			break
+		}
 		prefix = summaries
 	}
-	return append(append([]SimpleMsg{}, prefix...), tail), nil
+	cur := append(append([]SimpleMsg{}, prefix...), tail)
+	if estimateTokensSimple(cur) <= windowLimit {
+		return cur, nil
+	}
+	return hardTruncateSimpleMsgsToBudget(cur, windowLimit), nil
 }
 
 // splitIntoChunks 将消息按 windowLimit 切分为若干分块，保证每块估算 token 不超过 windowLimit（单条超长除外）。
@@ -220,13 +303,44 @@ func splitIntoChunks(msgs []SimpleMsg, windowLimit int) [][]SimpleMsg {
 	return chunks
 }
 
+const maxRunesPerSimpleMsgInSummarize = 8000
+
+func capSimpleMsgContentRunes(m SimpleMsg, maxRunes int) SimpleMsg {
+	if maxRunes <= 0 {
+		m.Content = contextTruncatedSuffix
+		return m
+	}
+	rs := []rune(m.Content)
+	if len(rs) <= maxRunes {
+		return m
+	}
+	suf := []rune(contextTruncatedSuffix)
+	if maxRunes <= len(suf) {
+		m.Content = string(rs[:maxRunes])
+		return m
+	}
+	m.Content = string(rs[:maxRunes-len(suf)]) + contextTruncatedSuffix
+	return m
+}
+
 // summarizeSimpleChunkWithLLM 使用当前模型对一段 SimpleMsg 历史生成简短摘要。
 func summarizeSimpleChunkWithLLM(agent *AgentCore, chunk []SimpleMsg) (SimpleMsg, error) {
 	if len(chunk) == 0 || agent == nil || agent.Client == nil {
 		return SimpleMsg{}, nil
 	}
+	maxRunes := maxRunesPerSimpleMsgInSummarize
+	if agent.MaxContextTokens > 0 {
+		mr := agent.MaxContextTokens * 2
+		if mr < maxRunes {
+			maxRunes = mr
+		}
+	}
+	if maxRunes > 32000 {
+		maxRunes = 32000
+	}
 	var historyText strings.Builder
 	for _, m := range chunk {
+		m = capSimpleMsgContentRunes(m, maxRunes)
 		switch m.Role {
 		case "user":
 			fmt.Fprintf(&historyText, "用户: %s\n", m.Content)
@@ -238,9 +352,29 @@ func summarizeSimpleChunkWithLLM(agent *AgentCore, chunk []SimpleMsg) (SimpleMsg
 			fmt.Fprintf(&historyText, "%s: %s\n", m.Role, m.Content)
 		}
 	}
+	ht := historyText.String()
+	maxHistRunes := maxRunes * 4
+	if agent.MaxContextTokens > 0 {
+		mh := agent.MaxContextTokens * 3
+		if mh < maxHistRunes {
+			maxHistRunes = mh
+		}
+	}
+	if maxHistRunes > 48000 {
+		maxHistRunes = 48000
+	}
+	if utf8.RuneCountInString(ht) > maxHistRunes {
+		rs := []rune(ht)
+		suf := []rune(contextTruncatedSuffix)
+		if maxHistRunes > len(suf) {
+			ht = string(rs[:maxHistRunes-len(suf)]) + contextTruncatedSuffix
+		} else {
+			ht = string(rs[:maxHistRunes])
+		}
+	}
 
 	sys := openai.SystemMessage("你是一个会话总结助手，请用简短中文总结以下对话的要点，突出长期偏好、重要结论和需要跨轮次记住的信息。尽量精炼，控制在200字以内。")
-	user := openai.UserMessage(historyText.String())
+	user := openai.UserMessage(ht)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

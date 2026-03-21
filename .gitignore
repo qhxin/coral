@@ -12,3 +12,4 @@ env_help_gen.go
 coverage.out
 coverage
 cover
+cover.out

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	openai "github.com/openai/openai-go/v3"
 )
@@ -252,6 +253,112 @@ func compactActiveMessages(agent *AgentCore, msgs []ChatMessage, now time.Time) 
 	return out, nil
 }
 
+func chatMessagesToSimpleForEstimate(msgs []ChatMessage) []SimpleMsg {
+	out := make([]SimpleMsg, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, SimpleMsg{Role: m.Role, Content: m.Content})
+	}
+	return out
+}
+
+// sessionSummaryChunkBudget 单块过期历史摘要请求的估算 token 上限（留出 system/user 与输出）。
+func sessionSummaryChunkBudget(agent *AgentCore) int {
+	if agent == nil {
+		return 3000
+	}
+	effective := agent.MaxContextTokens
+	if agent.MaxOutputTokens > 0 && agent.MaxContextTokens > agent.MaxOutputTokens {
+		effective = agent.MaxContextTokens - agent.MaxOutputTokens
+	}
+	if effective <= 0 {
+		return 3000
+	}
+	b := inputBudgetAfterSlack(effective) - 256 - 200
+	if b < 512 {
+		b = 512
+	}
+	return b
+}
+
+func buildSessionHistoryText(msgs []ChatMessage) string {
+	var historyText strings.Builder
+	for _, m := range msgs {
+		switch m.Role {
+		case "user":
+			fmt.Fprintf(&historyText, "用户: %s\n", m.Content)
+		case "assistant":
+			fmt.Fprintf(&historyText, "助手: %s\n", m.Content)
+		}
+	}
+	return historyText.String()
+}
+
+func summarizeChatMessageSliceOnce(agent *AgentCore, msgs []ChatMessage, callLabel string) (string, error) {
+	ht := buildSessionHistoryText(msgs)
+	maxRunes := 48000
+	if agent != nil && agent.MaxContextTokens > 0 {
+		mr := agent.MaxContextTokens * 3
+		if mr < maxRunes {
+			maxRunes = mr
+		}
+	}
+	if utf8.RuneCountInString(ht) > maxRunes {
+		rs := []rune(ht)
+		suf := []rune(contextTruncatedSuffix)
+		if maxRunes > len(suf) {
+			ht = string(rs[:maxRunes-len(suf)]) + contextTruncatedSuffix
+		} else {
+			ht = string(rs[:maxRunes])
+		}
+	}
+	sys := openai.SystemMessage("你是一个会话总结助手，请用简短中文总结以下对话的要点，突出用户长期偏好、重要结论和需要跨轮次记住的信息。不要超过200字。")
+	user := openai.UserMessage(ht)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	llmMeta := newLLMRequestLogMetaFromAgent(agent, callLabel, 256)
+	resp, err := agent.Client.ChatOnce(ctx, []openai.ChatCompletionMessageParamUnion{sys, user}, nil, 256, "", "", llmMeta)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Choices) == 0 {
+		return "", nil
+	}
+	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+}
+
+func mergeSessionSummaryParts(agent *AgentCore, combined string) (string, error) {
+	maxRunes := 48000
+	if agent != nil && agent.MaxContextTokens > 0 {
+		mr := agent.MaxContextTokens * 3
+		if mr < maxRunes {
+			maxRunes = mr
+		}
+	}
+	ht := combined
+	if utf8.RuneCountInString(ht) > maxRunes {
+		rs := []rune(ht)
+		suf := []rune(contextTruncatedSuffix)
+		if maxRunes > len(suf) {
+			ht = string(rs[:maxRunes-len(suf)]) + contextTruncatedSuffix
+		} else {
+			ht = string(rs[:maxRunes])
+		}
+	}
+	sys := openai.SystemMessage("请将以下多段会话摘要合并为一段中文摘要，不超过200字，突出用户长期偏好与重要结论。")
+	user := openai.UserMessage(ht)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	llmMeta := newLLMRequestLogMetaFromAgent(agent, "session_weekly_summary_merge", 256)
+	resp, err := agent.Client.ChatOnce(ctx, []openai.ChatCompletionMessageParamUnion{sys, user}, nil, 256, "", "", llmMeta)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Choices) == 0 {
+		return "", nil
+	}
+	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+}
+
 // summarizeMessagesWithLLM 使用当前模型对一段历史消息生成简短摘要。
 func summarizeMessagesWithLLM(agent *AgentCore, msgs []ChatMessage, now time.Time) (string, time.Time, time.Time, error) {
 	if len(msgs) == 0 || agent == nil || agent.Client == nil {
@@ -282,32 +389,45 @@ func summarizeMessagesWithLLM(agent *AgentCore, msgs []ChatMessage, now time.Tim
 		to = now
 	}
 
-	var historyText strings.Builder
-	for _, m := range msgs {
-		switch m.Role {
-		case "user":
-			fmt.Fprintf(&historyText, "用户: %s\n", m.Content)
-		case "assistant":
-			fmt.Fprintf(&historyText, "助手: %s\n", m.Content)
+	budget := sessionSummaryChunkBudget(agent)
+	var parts []string
+	start := 0
+	for start < len(msgs) {
+		end := start
+		for end < len(msgs) {
+			next := end + 1
+			sub := msgs[start:next]
+			if estimateTokensSimple(chatMessagesToSimpleForEstimate(sub)) > budget {
+				break
+			}
+			end = next
 		}
+		if end == start {
+			end = start + 1
+		}
+		sub := msgs[start:end]
+		s, err := summarizeChatMessageSliceOnce(agent, sub, "session_weekly_summary")
+		if err != nil {
+			log.Printf("error: summarizeMessagesWithLLM chunk failed: %v", err)
+			return "", from, to, err
+		}
+		if s != "" {
+			parts = append(parts, s)
+		}
+		start = end
 	}
-
-	sys := openai.SystemMessage("你是一个会话总结助手，请用简短中文总结以下对话的要点，突出用户长期偏好、重要结论和需要跨轮次记住的信息。不要超过200字。")
-	user := openai.UserMessage(historyText.String())
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	llmMeta := newLLMRequestLogMetaFromAgent(agent, "session_weekly_summary", 256)
-	resp, err := agent.Client.ChatOnce(ctx, []openai.ChatCompletionMessageParamUnion{sys, user}, nil, 256, "", "", llmMeta)
+	combined := strings.Join(parts, "\n")
+	if len(parts) <= 1 {
+		return combined, from, to, nil
+	}
+	merged, err := mergeSessionSummaryParts(agent, combined)
 	if err != nil {
-		log.Printf("error: summarizeMessagesWithLLM ChatOnce failed: %v", err)
-		return "", from, to, err
+		log.Printf("error: summarizeMessagesWithLLM merge failed: %v", err)
+		return combined, from, to, nil
 	}
-	if len(resp.Choices) == 0 {
-		log.Printf("warn: summarizeMessagesWithLLM got empty choices from model")
-		return "", from, to, nil
+	if merged == "" {
+		return combined, from, to, nil
 	}
-	return strings.TrimSpace(resp.Choices[0].Message.Content), from, to, nil
+	return merged, from, to, nil
 }
 

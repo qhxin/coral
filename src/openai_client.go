@@ -30,9 +30,10 @@ func newLLMRequestLogMetaFromAgent(agent *AgentCore, label string, requestMaxOut
 	}
 	meta.MaxContextTokens = agent.MaxContextTokens
 	if agent.MaxContextTokens > 0 && agent.MaxOutputTokens > 0 && agent.MaxContextTokens > agent.MaxOutputTokens {
-		meta.InputBudgetTokens = agent.MaxContextTokens - agent.MaxOutputTokens
+		eff := agent.MaxContextTokens - agent.MaxOutputTokens
+		meta.InputBudgetTokens = inputBudgetAfterSlack(eff)
 	} else if agent.MaxContextTokens > 0 {
-		meta.InputBudgetTokens = agent.MaxContextTokens
+		meta.InputBudgetTokens = inputBudgetAfterSlack(agent.MaxContextTokens)
 	}
 	return meta
 }

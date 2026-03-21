@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	openai "github.com/openai/openai-go/v3"
 )
@@ -180,7 +181,7 @@ func TestReduceHistory_pinsLastMessage(t *testing.T) {
 	}
 }
 
-func TestEnsureContextWithinLimitSimple_onReduceError_returnsOriginal(t *testing.T) {
+func TestEnsureContextWithinLimitSimple_onReduceError_hardTruncates(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -192,8 +193,11 @@ func TestEnsureContextWithinLimitSimple_onReduceError_returnsOriginal(t *testing
 		{Role: "user", Content: "tail"},
 	}
 	out := ensureContextWithinLimitSimple(msgs, 80, ag)
-	if len(out) != len(msgs) {
-		t.Fatalf("got %d want %d", len(out), len(msgs))
+	if estimateTokensSimple(out) > 80 {
+		t.Fatalf("over budget: est=%d", estimateTokensSimple(out))
+	}
+	if len(out) < 1 {
+		t.Fatal("expected non-empty output")
 	}
 }
 
@@ -204,5 +208,65 @@ func TestSummarizeSimpleChunkWithLLM_toolRoleLine(t *testing.T) {
 	msg, err := summarizeSimpleChunkWithLLM(a, []SimpleMsg{{Role: "tool", Content: "out"}})
 	if err != nil || msg.Role != "system" || msg.Content != "ok" {
 		t.Fatal(err, msg)
+	}
+}
+
+func TestCapSimpleMsgContentRunes(t *testing.T) {
+	if g := capSimpleMsgContentRunes(SimpleMsg{Content: "hi"}, 0); g.Content != contextTruncatedSuffix {
+		t.Fatal(g.Content)
+	}
+	if g := capSimpleMsgContentRunes(SimpleMsg{Content: "ab"}, 50); g.Content != "ab" {
+		t.Fatal(g.Content)
+	}
+	long := strings.Repeat("χ", 120)
+	suf := []rune(contextTruncatedSuffix)
+	g := capSimpleMsgContentRunes(SimpleMsg{Content: long}, len(suf)+15)
+	if !strings.HasSuffix(g.Content, contextTruncatedSuffix) {
+		t.Fatal()
+	}
+	n := minInt(4, len(suf))
+	g2 := capSimpleMsgContentRunes(SimpleMsg{Content: long}, n)
+	if utf8.RuneCountInString(g2.Content) != n {
+		t.Fatal(utf8.RuneCountInString(g2.Content))
+	}
+}
+
+func TestTruncateSimpleTailForBudget(t *testing.T) {
+	m := truncateSimpleTailForBudget(SimpleMsg{Role: "user", Content: "hi"}, 0)
+	if m.Content != "…" || m.ImageCount != 0 {
+		t.Fatal(m)
+	}
+	m2 := truncateSimpleTailForBudget(SimpleMsg{Role: "user", Content: "正文", ImageCount: 1}, 800)
+	if m2.ImageCount != 0 || !strings.Contains(m2.Content, "图片因长度限制") {
+		t.Fatal(m2.Content)
+	}
+	m3 := truncateSimpleTailForBudget(SimpleMsg{Role: "user", Content: "已有图片因长度限制说明", ImageCount: 1}, 800)
+	if m3.ImageCount != 0 || strings.Count(m3.Content, "图片因长度限制") != 1 {
+		t.Fatal(m3.Content)
+	}
+	long := SimpleMsg{Role: "user", Content: strings.Repeat("w", 3000)}
+	m4 := truncateSimpleTailForBudget(long, 35)
+	if estimateTokensSimple([]SimpleMsg{m4}) > 50 {
+		t.Fatalf("est=%d", estimateTokensSimple([]SimpleMsg{m4}))
+	}
+}
+
+func TestHardTruncateSimpleMsgsToBudget(t *testing.T) {
+	if len(hardTruncateSimpleMsgsToBudget([]SimpleMsg{{Content: "x"}}, 0)) != 1 {
+		t.Fatal()
+	}
+	single := []SimpleMsg{{Role: "user", Content: strings.Repeat("z", 4000)}}
+	out := hardTruncateSimpleMsgsToBudget(single, 40)
+	if estimateTokensSimple(out) > 55 {
+		t.Fatalf("est=%d", estimateTokensSimple(out))
+	}
+	multi := []SimpleMsg{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: strings.Repeat("a", 400)},
+		{Role: "user", Content: strings.Repeat("b", 400)},
+	}
+	out2 := hardTruncateSimpleMsgsToBudget(multi, 35)
+	if estimateTokensSimple(out2) > 45 {
+		t.Fatalf("est=%d", estimateTokensSimple(out2))
 	}
 }
