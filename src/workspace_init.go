@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,7 +91,52 @@ func initWorkspace(dir string) (agentPath, userPath, memoryPath string, err erro
 			return "", "", "", err
 		}
 	}
+	if err = initWorkspaceSkills(dir); err != nil {
+		return "", "", "", err
+	}
 	return agentPath, userPath, memoryPath, nil
+}
+
+func initWorkspaceSkills(workspaceDir string) error {
+	skillsDir := filepath.Join(workspaceDir, "skills")
+	st, err := os.Stat(skillsDir)
+	if err == nil {
+		if !st.IsDir() {
+			return fmt.Errorf("workspace skills path is not a directory: %s", skillsDir)
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return fs.WalkDir(defaultSkillsFS, embeddedSkillsRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if filepath.Ext(path) != ".md" {
+			return nil
+		}
+
+		rel := strings.TrimPrefix(path, embeddedSkillsRoot+"/")
+		if rel == path || rel == "" {
+			return nil
+		}
+		dst := filepath.Join(skillsDir, filepath.FromSlash(rel))
+		if mkErr := os.MkdirAll(filepath.Dir(dst), 0o755); mkErr != nil {
+			return mkErr
+		}
+		content, readErr := defaultSkillsFS.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if writeErr := os.WriteFile(dst, content, 0o644); writeErr != nil {
+			return writeErr
+		}
+		return nil
+	})
 }
 
 // readFileAsString 读取文本文件为字符串。

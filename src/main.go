@@ -40,6 +40,9 @@ func runApp(args []string, cfg *appRunConfig) error {
 }
 
 func main() {
+	if err := loadDotenvFromExecutableDir(); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: load .env from executable dir failed: %v\n", err)
+	}
 	if err := runApp(os.Args[1:], nil); err != nil {
 		fmt.Println(err)
 		os.Exit(1)

@@ -93,7 +93,7 @@ func TestStrPtr(t *testing.T) {
 }
 
 func TestEnvIsTruthy(t *testing.T) {
-	k := "CORVAL_TEST_TRUTHY"
+	k := "CORAL_TEST_TRUTHY"
 	t.Setenv(k, "")
 	if envIsTruthy(k) {
 		t.Fatal()

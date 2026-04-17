@@ -23,13 +23,13 @@ isProject: false
 
 ## 背景定位（基于日志）
 
-- 从 `[d:\cursor-project\corval\build\workspace\logs\2026-03-18.log](d:\cursor-project\corval\build\workspace\logs\2026-03-18.log)` 可见：模型确实产生了 `tool_calls`，但 `arguments` 一直是 `{}`，宿主侧返回 `执行出错: path 不能为空`，模型无法从错误中推断正确参数结构，导致反复失败。
+- 从 `[d:\cursor-project\coral\build\workspace\logs\2026-03-18.log](d:\cursor-project\coral\build\workspace\logs\2026-03-18.log)` 可见：模型确实产生了 `tool_calls`，但 `arguments` 一直是 `{}`，宿主侧返回 `执行出错: path 不能为空`，模型无法从错误中推断正确参数结构，导致反复失败。
 
 ## 改动点 1：系统提示加入 tool_calls JSON 示例
 
 - **文件范围**：
-  - 默认模板：`[d:\cursor-project\corval\main.go](d:\cursor-project\corval\main.go)` 中 `defaultAgent`。
-  - 现有 workspace：若你的运行 workspace 使用 `build/workspace`，同步更新 `[d:\cursor-project\corval\build\workspace\AGENT.md](d:\cursor-project\corval\build\workspace\AGENT.md)`（或你真实运行时的 workspace `AGENT.md`）。
+  - 默认模板：`[d:\cursor-project\coral\main.go](d:\cursor-project\coral\main.go)` 中 `defaultAgent`。
+  - 现有 workspace：若你的运行 workspace 使用 `build/workspace`，同步更新 `[d:\cursor-project\coral\build\workspace\AGENT.md](d:\cursor-project\coral\build\workspace\AGENT.md)`（或你真实运行时的 workspace `AGENT.md`）。
 - **内容要求**：
   - 明确说明：
     - 工具必须通过 `tool_calls` 发起；
@@ -73,7 +73,7 @@ isProject: false
 
 ## 改动点 2：错误信息改为“可执行指导”
 
-- **文件范围**：`[d:\cursor-project\corval\main.go](d:\cursor-project\corval\main.go)` 中 `defaultFilesystemTools` 的各个 executor（至少 `workspace_write_file`、`memory_write_important`）。
+- **文件范围**：`[d:\cursor-project\coral\main.go](d:\cursor-project\coral\main.go)` 中 `defaultFilesystemTools` 的各个 executor（至少 `workspace_write_file`、`memory_write_important`）。
 - **实现策略**：
   - 当缺必填字段时，不只返回“不能为空”，而是返回包含：
     - **错误原因**（缺少哪个字段）
@@ -100,7 +100,7 @@ isProject: false
 - 在 CLI 里输入：
   - `在工作区创建一个文件：a.txt ，内容写abc`
   - `我要你长期永远记住这个做事原则：...`
-- 观察 `[d:\cursor-project\corval\build\workspace\logs\YYYY-MM-DD.log](d:\cursor-project\corval\build\workspace\logs\YYYY-MM-DD.log)`：
+- 观察 `[d:\cursor-project\coral\build\workspace\logs\YYYY-MM-DD.log](d:\cursor-project\coral\build\workspace\logs\YYYY-MM-DD.log)`：
   - 期望模型第一次或第二次就能产生带完整字段的 `tool_calls.function.arguments`，不再是 `{}`。
 - 检查 workspace 文件：
   - `workspace/a.txt` 创建成功
@@ -108,6 +108,6 @@ isProject: false
 
 ## 预计修改文件清单
 
-- `[d:\cursor-project\corval\main.go](d:\cursor-project\corval\main.go)`：更新 `defaultAgent` 文案；更新工具 executor 的错误返回内容。
-- `[d:\cursor-project\corval\build\workspace\AGENT.md](d:\cursor-project\corval\build\workspace\AGENT.md)`：若该目录即运行时 workspace，同步更新以立刻生效（否则更新真实运行 workspace 的 `AGENT.md`）。
+- `[d:\cursor-project\coral\main.go](d:\cursor-project\coral\main.go)`：更新 `defaultAgent` 文案；更新工具 executor 的错误返回内容。
+- `[d:\cursor-project\coral\build\workspace\AGENT.md](d:\cursor-project\coral\build\workspace\AGENT.md)`：若该目录即运行时 workspace，同步更新以立刻生效（否则更新真实运行 workspace 的 `AGENT.md`）。
 

@@ -74,6 +74,40 @@ func TestInitWorkspace_createsDefaults(t *testing.T) {
 	if string(b) != "keep" {
 		t.Fatal("expected existing AGENT.md unchanged")
 	}
+
+	// 默认应自动初始化 skills 目录与关键技能文件。
+	for _, p := range []string{
+		filepath.Join(dir, "skills", "filesystem", "read_file.md"),
+		filepath.Join(dir, "skills", "filesystem", "write_file.md"),
+		filepath.Join(dir, "skills", "memory", "remember.md"),
+	} {
+		b, err := os.ReadFile(p)
+		if err != nil || len(b) == 0 {
+			t.Fatalf("skill file %s: %v", p, err)
+		}
+	}
+}
+
+func TestInitWorkspace_keepsExistingSkillsDir(t *testing.T) {
+	dir := t.TempDir()
+	customSkill := filepath.Join(dir, "skills", "filesystem", "read_file.md")
+	if err := os.MkdirAll(filepath.Dir(customSkill), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(customSkill, []byte("custom-skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, _, err := initWorkspace(dir); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(customSkill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "custom-skill" {
+		t.Fatalf("expected existing skill unchanged, got %q", string(got))
+	}
 }
 
 func TestReadFileAsString(t *testing.T) {

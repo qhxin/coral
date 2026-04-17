@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-var corvalLoc *time.Location
+var coralLoc *time.Location
 
 // tryParseUTCOffset 尝试解析类似 `UTC+8` / `UTC+08:30` 这类偏移格式。
 // 若非 UTC 偏移写法则 ok 为 false 且 err 为 nil；解析到 UTC 但数值非法时返回 err。
@@ -52,12 +52,12 @@ func tryParseUTCOffset(tz string) (loc *time.Location, ok bool, err error) {
 	return time.FixedZone(upper, offsetSeconds), true, nil
 }
 
-// corvalLocation 根据环境变量 TIMEZONE 解析并返回时区；
+// coralLocation 根据环境变量 TIMEZONE 解析并返回时区；
 // 失败时直接终止进程，避免静默使用错误时区。
-func corvalLocation() *time.Location {
+func coralLocation() *time.Location {
 	// 保证仅解析一次（init 中会先调用一次）。
-	if corvalLoc != nil {
-		return corvalLoc
+	if coralLoc != nil {
+		return coralLoc
 	}
 
 	tz := strings.TrimSpace(os.Getenv("TIMEZONE"))
@@ -68,28 +68,28 @@ func corvalLocation() *time.Location {
 	if loc, ok, parseErr := tryParseUTCOffset(tz); parseErr != nil {
 		log.Fatalf("fatal: %v", parseErr)
 	} else if ok {
-		corvalLoc = loc
-		return corvalLoc
+		coralLoc = loc
+		return coralLoc
 	}
 
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
 		log.Fatalf("fatal: failed to load timezone %q; try using UTC+8 / UTC+08:30 or a valid IANA zone like Asia/Shanghai. error: %v", tz, err)
 	}
-	corvalLoc = loc
-	return corvalLoc
+	coralLoc = loc
+	return coralLoc
 }
 
-// init 在程序启动时统一设置全局本地时区为 corvalLocation（默认 UTC+8），
+// init 在程序启动时统一设置全局本地时区为 coralLocation（默认 UTC+8），
 // 确保后续若有直接使用 time.Now() 等未显式指定时区的调用，也默认使用该配置时区。
 func init() {
-	time.Local = corvalLocation()
+	time.Local = coralLocation()
 }
 
-// Now 返回统一的当前时间，使用 corvalLocation 指定的时区。
-// 约定：业务代码禁止直接使用 time.Now()，一律使用 Now() 或显式基于 corvalLocation。
+// Now 返回统一的当前时间，使用 coralLocation 指定的时区。
+// 约定：业务代码禁止直接使用 time.Now()，一律使用 Now() 或显式基于 coralLocation。
 func Now() time.Time {
-	return time.Now().In(corvalLocation())
+	return time.Now().In(coralLocation())
 }
 
 // NowUnix 返回统一时区下的 Unix 秒时间戳，方便日志或持久化。

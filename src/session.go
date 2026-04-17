@@ -28,8 +28,8 @@ const (
 	// 默认会话汇总窗口（天），超过该窗口的历史会被转为摘要。
 	defaultSummaryWindowDays = 7
 
-	// CORVAL_SUMMARY_WINDOW_DAYS 允许通过环境变量覆盖默认窗口天数（仅接受正整数）。
-	envSummaryWindowDays = "CORVAL_SUMMARY_WINDOW_DAYS"
+	// CORAL_SUMMARY_WINDOW_DAYS 允许通过环境变量覆盖默认窗口天数（仅接受正整数）。
+	envSummaryWindowDays = "CORAL_SUMMARY_WINDOW_DAYS"
 )
 
 func summaryWindowDaysFromEnv() int {
@@ -97,7 +97,7 @@ func writeSessionMessages(fs *WorkspaceFS, relPath string, msgs []ChatMessage) e
 	return nil
 }
 
-// saveInboundMediaIfEnabled 在 CORVAL_SAVE_INBOUND_MEDIA 开启时将图片写入 workspace 并返回相对路径列表。
+// saveInboundMediaIfEnabled 在 CORAL_SAVE_INBOUND_MEDIA 开启时将图片写入 workspace 并返回相对路径列表。
 func saveInboundMediaIfEnabled(fs *WorkspaceFS, sessionID string, images []UserImage) []string {
 	if fs == nil || !saveInboundMediaEnabled() || len(images) == 0 {
 		return nil

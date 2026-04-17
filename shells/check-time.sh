@@ -11,10 +11,10 @@ WHITELIST_PATTERN='src/timeutil\.go|timeutil\.go'
 
 if command -v rg >/dev/null 2>&1; then
   # Exclude *_test.go to match the ps1 behavior.
-  RESULT=$(rg 'time\.Now\(' . --glob '*.go' --glob '!*_test.go' 2>/dev/null || true)
+  RESULT=$(rg 'time\.Now\(' ./src --glob '*.go' --glob '!*_test.go' 2>/dev/null || true)
 else
   # Fallback when rg is not available.
-  RESULT=$(grep -RIn --include='*.go' --exclude='*_test.go' 'time.Now(' . 2>/dev/null || true)
+  RESULT=$(grep -RIn --include='*.go' --exclude='*_test.go' 'time.Now(' ./src 2>/dev/null || true)
 fi
 
 if [ -z "${RESULT}" ]; then

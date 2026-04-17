@@ -18,10 +18,10 @@ const (
 	defaultVisionEmptyPrompt     = "请描述或分析这张图片。"
 	defaultVisionMaxImageBytes   = 10 << 20 // 10 MiB
 	defaultVisionTokensPerImage  = 1700
-	envVisionEmptyText           = "CORVAL_VISION_EMPTY_TEXT"
+	envVisionEmptyText           = "CORAL_VISION_EMPTY_TEXT"
 	envVisionMaxImageBytes       = "AGENT_VISION_MAX_IMAGE_BYTES"
 	envVisionTokensPerImage      = "AGENT_VISION_TOKENS_PER_IMAGE"
-	envSaveInboundMedia          = "CORVAL_SAVE_INBOUND_MEDIA"
+	envSaveInboundMedia          = "CORAL_SAVE_INBOUND_MEDIA"
 )
 
 func visionEmptyPrompt() string {

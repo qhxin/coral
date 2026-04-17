@@ -28,6 +28,8 @@ type ToolResult struct {
 type ToolExecutor func(args json.RawMessage) (string, error)
 
 // defaultFilesystemTools 构造基于 WorkspaceFS 的默认文件系统工具集合。
+// 注意: 默认启用技能注册表，此函数仅作为 fallback 保留（当CORAL_USE_SKILL_REGISTRY=false时）。
+// 技能注册表（SkillRegistry）提供了更灵活的 Markdown 配置驱动方式来定义工具。
 func defaultFilesystemTools(fs *WorkspaceFS) ([]Tool, map[string]ToolExecutor) {
 	tools := []Tool{
 		{
@@ -130,6 +132,9 @@ func dispatchToolsOpenAI(calls []openai.ChatCompletionMessageToolCallUnion, exec
 }
 
 // shouldForceMemoryTool 判断是否需要强制调用 memory_write_important。
+// 已废弃: 当CORAL_USE_PROMPT_FIRST默认启用时，此函数不会被调用
+// 工具调用决策由模型通过system prompt自主完成
+// Deprecated: Use prompt-based tool guidance instead
 func shouldForceMemoryTool(userInput string) bool {
 	s := strings.TrimSpace(userInput)
 	if s == "" {

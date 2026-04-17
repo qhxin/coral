@@ -1,14 +1,23 @@
 package main
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
+func resetTestLogger() {
+	if dl, ok := log.Writer().(*dailyFileLogger); ok {
+		_ = dl.Close()
+	}
+	log.SetOutput(os.Stderr)
+}
+
 func TestBootstrapAgentWithWorkspaceResolve(t *testing.T) {
 	dir := t.TempDir()
+	t.Cleanup(resetTestLogger)
 	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("LLAMA_SERVER_ENDPOINT", "")
 	t.Setenv("OPENAI_MODEL", "test-model")
@@ -38,6 +47,7 @@ func TestBootstrapAgentWithWorkspaceResolve(t *testing.T) {
 
 func TestBootstrapAgent_viaOsArgs(t *testing.T) {
 	dir := t.TempDir()
+	t.Cleanup(resetTestLogger)
 	old := os.Args
 	t.Cleanup(func() { os.Args = old })
 	os.Args = []string{"coral", "-w", dir}

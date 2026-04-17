@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -23,26 +24,94 @@ type AgentCore struct {
 	MaxContextTokens  int
 	MaxOutputTokens   int
 	SummaryWindowDays int
+
+	// 新增: 技能注册表（默认启用，除非CORAL_USE_SKILL_REGISTRY=false）
+	SkillRegistry *SkillRegistry
+	// 新增: Prompt管理器（默认启用，除非CORAL_USE_PROMPT_FIRST=false）
+	PromptManager *PromptManager
+	// 新增: RAG记忆系统（默认启用，除非CORAL_USE_RAG_MEMORY=false）
+	RAGMemory *RAGMemory
+	// 新增: 意图检测器（默认启用，除非CORAL_USE_INTENT_DETECTOR=false）
+	IntentDetector *IntentDetector
 }
 
 // NewAgentCore 创建一个新的 AgentCore，由外部注入 OpenAIClient 与初始上下文。
 func NewAgentCore(client *OpenAIClient, systemContent, userProfile string, fs *WorkspaceFS, maxContextTokens, maxOutputTokens int) *AgentCore {
-	var tools []Tool
-	executors := make(map[string]ToolExecutor)
-	if fs != nil {
-		tools, executors = defaultFilesystemTools(fs)
-	}
-	return &AgentCore{
+	agent := &AgentCore{
 		Client:            client,
 		FS:                fs,
-		Tools:             tools,
-		Executors:         executors,
 		SystemContent:     systemContent,
 		UserProfile:       userProfile,
 		MaxContextTokens:  maxContextTokens,
 		MaxOutputTokens:   maxOutputTokens,
 		SummaryWindowDays: defaultSummaryWindowDays,
 	}
+
+	// 初始化PromptManager（默认启用Prompt-First模式）
+	if os.Getenv("CORAL_USE_PROMPT_FIRST") != "false" {
+		agent.PromptManager = NewPromptManager(defaultAgentBase)
+		log.Printf("info: using prompt-first tool guidance")
+	}
+
+	// 初始化RAG记忆系统（默认启用RAG模式）
+	if os.Getenv("CORAL_USE_RAG_MEMORY") != "false" && fs != nil {
+		agent.RAGMemory = NewRAGMemory(fs)
+		if err := agent.RAGMemory.Load(); err != nil {
+			log.Printf("warn: load RAG memory failed: %v", err)
+		} else {
+			log.Printf("info: loaded %d memories into RAG", len(agent.RAGMemory.entries))
+		}
+	}
+
+	// 初始化意图检测器（默认启用）
+	if os.Getenv("CORAL_USE_INTENT_DETECTOR") != "false" {
+		agent.IntentDetector = NewIntentDetector(agent.Tools)
+		log.Printf("info: using intent detector")
+	}
+
+	// 根据环境变量决定使用技能注册表还是硬编码工具（默认启用技能注册表）
+	if os.Getenv("CORAL_USE_SKILL_REGISTRY") != "false" && fs != nil {
+		agent.SkillRegistry = NewSkillRegistry(fs)
+		agent.SkillRegistry.RegisterBuiltinHandlers()
+
+		// 加载skills目录
+		skillsDir := filepath.Join(fs.Root, "skills")
+		if _, err := os.Stat(skillsDir); err == nil {
+			if err := agent.SkillRegistry.LoadFromDir(skillsDir); err != nil {
+				log.Printf("warn: load skills failed: %v, fallback to default tools", err)
+				agent.loadDefaultTools(fs)
+			} else {
+				agent.Tools, agent.Executors = agent.SkillRegistry.ToTools()
+				log.Printf("info: loaded %d skills from %s", len(agent.Tools), skillsDir)
+			}
+		} else {
+			log.Printf("warn: skills dir not found at %s, using default tools", skillsDir)
+			agent.loadDefaultTools(fs)
+		}
+	} else {
+		agent.loadDefaultTools(fs)
+	}
+
+	return agent
+}
+
+// loadDefaultTools 加载原有硬编码工具（回退方案）
+func (a *AgentCore) loadDefaultTools(fs *WorkspaceFS) {
+	if fs != nil {
+		a.Tools, a.Executors = defaultFilesystemTools(fs)
+	}
+}
+
+// loadMemoryContent 加载MEMORY.md内容
+func (a *AgentCore) loadMemoryContent() string {
+	if a.FS == nil {
+		return ""
+	}
+	content, err := a.FS.Read("MEMORY.md")
+	if err != nil {
+		return ""
+	}
+	return content
 }
 
 // asOpenAITools 将内部 Tool 列表转换为 OpenAI tools 定义。
@@ -100,8 +169,38 @@ func (a *AgentCore) HandleWithSessionWithMedia(sessionID string, userInput strin
 
 	// 构造轻量消息：系统 + 用户档案 + 会话历史 + 本轮 user，用于 token 估算与裁剪。
 	var simpleMsgs []SimpleMsg
-	if strings.TrimSpace(a.SystemContent) != "" {
-		simpleMsgs = append(simpleMsgs, SimpleMsg{Role: "system", Content: a.SystemContent})
+
+	// 确定系统提示词：使用PromptManager动态构建，或回退到固定systemContent
+	var systemContent string
+	if a.PromptManager != nil && a.SkillRegistry != nil {
+		// 使用Prompt-First模式：动态构建包含工具描述的系统提示
+		tools, _ := a.SkillRegistry.ToTools()
+
+		// 如果使用RAG，则基于查询检索相关记忆；否则加载全部记忆
+		if a.RAGMemory != nil {
+			systemContent = a.PromptManager.BuildSystemPromptWithRAGAndWorkspace(
+				tools,
+				a.RAGMemory,
+				rawText,
+				a.SystemContent,
+				a.UserProfile,
+			)
+		} else {
+			memoryContent := a.loadMemoryContent()
+			systemContent = a.PromptManager.BuildSystemPromptWithWorkspaceContext(
+				tools,
+				memoryContent,
+				a.SystemContent,
+				a.UserProfile,
+			)
+		}
+	} else {
+		// 回退到固定系统提示
+		systemContent = a.SystemContent
+	}
+
+	if strings.TrimSpace(systemContent) != "" {
+		simpleMsgs = append(simpleMsgs, SimpleMsg{Role: "system", Content: systemContent})
 	}
 	if strings.TrimSpace(a.UserProfile) != "" {
 		simpleMsgs = append(simpleMsgs, SimpleMsg{Role: "user", Content: a.UserProfile})
@@ -163,11 +262,28 @@ func (a *AgentCore) HandleWithSessionWithMedia(sessionID string, userInput strin
 		inputBudget = inputBudgetAfterSlack(effectiveLimit)
 	}
 
-	forceKey := rawText
-	if forceKey == "" {
-		forceKey = modelUserText
+	// 工具选择策略：默认auto模式
+	toolChoice := "auto"
+	forceFunction := ""
+
+	// 仅在Prompt-First模式禁用时使用硬编码强制逻辑
+	if os.Getenv("CORAL_USE_PROMPT_FIRST") == "false" {
+		forceKey := rawText
+		if forceKey == "" {
+			forceKey = modelUserText
+		}
+		if shouldForceMemoryTool(forceKey) {
+			forceFunction = "memory_write_important"
+		}
+	} else if a.IntentDetector != nil {
+		// Prompt-First模式下，可选使用意图检测器辅助决策（高置信度时强制）
+		intent, confidence := a.IntentDetector.Detect(rawText)
+		if confidence > 0.85 {
+			toolChoice = "required"
+			forceFunction = intent.Action
+			log.Printf("info: intent detector triggered with confidence %.2f for action %s", confidence, intent.Action)
+		}
 	}
-	forceMemory := shouldForceMemoryTool(forceKey)
 
 	hadToolError := false
 	toolRound := 0
@@ -176,11 +292,6 @@ func (a *AgentCore) HandleWithSessionWithMedia(sessionID string, userInput strin
 			messages = trimOpenAIMessagesToBudget(messages, tools, inputBudget, headKeep, tailKeep)
 		}
 
-		toolChoice := "auto"
-		forceFunction := ""
-		if forceMemory {
-			forceFunction = "memory_write_important"
-		}
 		if hadToolError {
 			toolChoice = "required"
 		}

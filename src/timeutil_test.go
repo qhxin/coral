@@ -44,17 +44,17 @@ func TestNowUnixAndRFC3339(t *testing.T) {
 	}
 }
 
-func TestCorvalLocation_IANA_afterReset(t *testing.T) {
-	prev := corvalLoc
+func TestCoralLocation_IANA_afterReset(t *testing.T) {
+	prev := coralLoc
 	t.Cleanup(func() {
-		corvalLoc = prev
-		time.Local = corvalLocation()
+		coralLoc = prev
+		time.Local = coralLocation()
 	})
-	corvalLoc = nil
+	coralLoc = nil
 	t.Setenv("TIMEZONE", "UTC")
-	loc := corvalLocation()
+	loc := coralLocation()
 	time.Local = loc
 	if Now().Location().String() != loc.String() {
-		t.Fatal("Now should use corval location")
+		t.Fatal("Now should use coral location")
 	}
 }
